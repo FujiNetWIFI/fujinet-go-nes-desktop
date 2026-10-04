@@ -207,10 +207,14 @@ function(nes_provide_dependency)
     endif()
   endif()
 
-  # Warn when a git checkout has drifted from the pin recorded here -- the
-  # staged protocol sources are the wire format, and a drifted tree can
-  # silently change what the cart device speaks.
-  if(DEP_COMMIT AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  # Keep a git checkout on the pin recorded here. third_party/ is not a
+  # submodule, so nothing else moves it when the pin is bumped, and a stale
+  # tree fails to compile against the host code -- or worse, compiles and
+  # silently changes the wire format the cart device speaks. A clean checkout
+  # is moved to the pin (fetching it first if the clone predates it); one with
+  # local changes stops the configure rather than have them overwritten.
+  # Deliberate work on a different commit belongs behind ${DEP_OVERRIDE}.
+  if(DEP_COMMIT AND EXISTS "${_path}/.git")
     find_package(Git QUIET)
     if(GIT_FOUND)
       execute_process(
@@ -218,9 +222,57 @@ function(nes_provide_dependency)
         OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET RESULT_VARIABLE _rc)
       if(_rc EQUAL 0 AND NOT _head STREQUAL DEP_COMMIT)
-        message(STATUS
-          "${DEP_NAME}: checkout is ${_head}, pinned ${DEP_COMMIT} "
-          "(cmake/Dependencies.cmake)")
+        execute_process(
+          COMMAND ${GIT_EXECUTABLE} -C "${_path}" status --porcelain
+                  --untracked-files=no
+          OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        if(_dirty)
+          message(FATAL_ERROR
+            "${DEP_NAME}: ${DEP_PATH} is at ${_head} with local changes, but "
+            "cmake/Dependencies.cmake pins ${DEP_COMMIT}. Commit or stash "
+            "them and re-run cmake to move to the pin, or keep working on "
+            "this tree with -D${DEP_OVERRIDE}=${_path}.")
+        endif()
+
+        execute_process(
+          COMMAND ${GIT_EXECUTABLE} -C "${_path}" cat-file -e
+                  "${DEP_COMMIT}^{commit}"
+          RESULT_VARIABLE _have ERROR_QUIET)
+        if(NOT _have EQUAL 0)
+          message(STATUS "${DEP_NAME}: fetching pinned ${DEP_COMMIT}")
+          execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C "${_path}" fetch --quiet origin
+            RESULT_VARIABLE _rc)
+          execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C "${_path}" cat-file -e
+                    "${DEP_COMMIT}^{commit}"
+            RESULT_VARIABLE _have ERROR_QUIET)
+          if(NOT _have EQUAL 0)
+            # Servers that only advertise branch heads won't have served it
+            # above if the pin's branch moved on; ask for the commit itself.
+            execute_process(
+              COMMAND ${GIT_EXECUTABLE} -C "${_path}" fetch --quiet origin
+                      "${DEP_COMMIT}"
+              RESULT_VARIABLE _have)
+          endif()
+          if(NOT _have EQUAL 0)
+            message(FATAL_ERROR
+              "${DEP_NAME}: pinned commit ${DEP_COMMIT} is not in ${DEP_PATH} "
+              "and could not be fetched from origin. Fetch it by hand, or "
+              "point ${DEP_OVERRIDE} at a checkout that has it.")
+          endif()
+        endif()
+
+        message(STATUS "${DEP_NAME}: moving ${_head} -> pinned ${DEP_COMMIT}")
+        execute_process(
+          COMMAND ${GIT_EXECUTABLE} -C "${_path}" -c advice.detachedHead=false
+                  checkout --quiet "${DEP_COMMIT}"
+          RESULT_VARIABLE _rc)
+        if(NOT _rc EQUAL 0)
+          message(FATAL_ERROR
+            "${DEP_NAME}: could not check out ${DEP_COMMIT} in ${DEP_PATH}.")
+        endif()
       endif()
     endif()
   endif()
