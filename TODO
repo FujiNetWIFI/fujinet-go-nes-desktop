@@ -59,7 +59,7 @@ M3  frontends                                                         [~]
 
 M4  packaging                                                         [ ]
   [x] MesenCE add-fujinet-support pushed; MESEN_COMMIT pinned to
-      ba4abc590 (Dependencies.cmake and both flatpak manifests)
+      ad1425a09 (Dependencies.cmake and both flatpak manifests)
   [x] patch 0002 (.nes ROM images) upstreamed: fujinet-firmware da3973c10
       on nes-bringup; drop the patch once the pin includes it
   [ ] flatpak builds, release dry run on a test tag

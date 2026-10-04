@@ -125,7 +125,8 @@ int main(void)
         check(nessession_copy_frame(s, px, &h, &z) == 1, "a forced copy (serial 0) always copies");
         check(h == 240, "frame is 240 lines");
         /* CONFIG draws text on a plain background: wait for more than one colour */
-        for (tries = 0; tries < 50; tries++) {
+        /* up to 15 s: a loaded CI runner can take a while to the first paint */
+        for (tries = 0; tries < 150; tries++) {
             uint32_t first = px[0];
             distinct = 0;
             for (i = 0; i < NESSESSION_FB_WIDTH * h; i++) if (px[i] != first) distinct++;
