@@ -861,6 +861,14 @@ static void fill(NSStackView *stack, NSView *view)
         if (!any) [s appendString:@" (nothing held)"];
         [s appendString:@"\n"];
     }
+    const char *kbd = nes_keyboard_name(a.keyboard);
+    static const char *const tapes[3] = { "idle", "playing", "recording" };
+    [s appendFormat:@"\nExpansion  %s\n", kbd ? kbd : "?"];
+    if (a.keyboard != NES_KBD_NONE) {
+        if (a.keyboard == NES_KBD_FAMILY_BASIC)
+            [s appendFormat:@"Tape       %s\n", (a.tape >= 0 && a.tape < 3) ? tapes[a.tape] : "?"];
+        [s appendFormat:@"Keys held  %s\n", a.keys_held[0] ? a.keys_held : "(nothing held)"];
+    }
     _apu.string = s;
 }
 

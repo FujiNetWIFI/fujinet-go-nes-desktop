@@ -331,14 +331,22 @@ static void refresh_apu(DbgWin *w)
         "DMC        %s   %d bytes left\n\n"
         "Frame IRQ %s   DMC IRQ %s\n\n"
         "Controller 1  $%02X  %s\n"
-        "Controller 2  $%02X  %s\n",
+        "Controller 2  $%02X  %s\n\n"
+        "Expansion port  %s\n"
+        "Data Recorder   %s\n"
+        "Keys held       %s\n",
         a.pulse1_enabled ? "on " : "off", a.pulse1_period, a.pulse1_volume, a.pulse1_duty,
         a.pulse2_enabled ? "on " : "off", a.pulse2_period, a.pulse2_volume, a.pulse2_duty,
         a.triangle_enabled ? "on " : "off", a.triangle_period,
         a.noise_enabled ? "on " : "off", a.noise_period, a.noise_volume,
         a.dmc_enabled ? "on " : "off", a.dmc_bytes_left,
         a.frame_irq ? "enabled" : "off", a.dmc_irq ? "enabled" : "off",
-        a.pad[0], pad[0], a.pad[1], pad[1]);
+        a.pad[0], pad[0], a.pad[1], pad[1],
+        a.keyboard == NES_KBD_NONE ? "(nothing attached)" : nes_keyboard_name(a.keyboard),
+        a.keyboard != NES_KBD_FAMILY_BASIC ? "(none)"
+            : a.tape == NES_TAPE_PLAYING ? "playing"
+            : a.tape == NES_TAPE_RECORDING ? "recording" : "stopped",
+        a.keyboard == NES_KBD_NONE ? "-" : a.keys_held[0] ? a.keys_held : "(nothing held)");
     set_text(w->apu_text, text);
 }
 

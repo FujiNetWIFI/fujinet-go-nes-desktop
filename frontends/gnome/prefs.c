@@ -34,7 +34,8 @@ typedef struct {
     const char *key;
     int def;
     int live_port;   /* -1: a restart option; 0/1: a live port-type row;
-                        -3: the region; -4: the display aspect */
+                        -3: the region; -4: the display aspect;
+                        -5: the expansion port */
 } RowBinding;
 
 static void binding_free(gpointer p, GClosure *closure)
@@ -78,6 +79,10 @@ static void combo_changed(GObject *row, GParamSpec *pspec, gpointer user_data)
     }
     if (b->live_port == -3) {
         nessession_set_region(b->state->session, sel);
+        return;
+    }
+    if (b->live_port == -5) {
+        nessession_set_keyboard(b->state->session, sel);
         return;
     }
     if (b->live_port == -4) {
@@ -272,6 +277,11 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
                                    nes_ctrl_type_name, 1);
     adw_preferences_group_add(ports, state->port_row[0]);
     adw_preferences_group_add(ports, state->port_row[1]);
+    adw_preferences_group_add(ports,
+        combo_row(state, "Expansion port", "A keyboard on the Famicom expansion port. "
+                  "Scroll Lock switches typing between it and the controllers; "
+                  "the Data Recorder comes with the Family BASIC Keyboard",
+                  "keyboard", NES_KBD_NONE, nes_keyboard_name, -5));
     update_port_subtitle(state, 0);
     update_port_subtitle(state, 1);
 

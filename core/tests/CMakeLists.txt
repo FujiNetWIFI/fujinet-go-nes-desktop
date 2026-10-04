@@ -16,6 +16,14 @@ target_link_libraries(session_test PRIVATE nes_session)
 add_test(NAME session COMMAND session_test)
 set_tests_properties(session PROPERTIES TIMEOUT 120)
 
+# The expansion-port keyboards: a ROM scans the matrix the way Family BASIC
+# does; host keys (keyboard mode), the on-screen keyboard, Scroll Lock, the
+# Subor, the layout tables and the Data Recorder.
+add_executable(keyboard_test keyboard_test.c)
+target_link_libraries(keyboard_test PRIVATE nes_session)
+add_test(NAME keyboard COMMAND keyboard_test)
+set_tests_properties(keyboard PROPERTIES TIMEOUT 120)
+
 # The remappable binding table and the keyboard translator, pure.
 add_executable(bindings_test bindings_test.c)
 target_link_libraries(bindings_test PRIVATE nes_session)

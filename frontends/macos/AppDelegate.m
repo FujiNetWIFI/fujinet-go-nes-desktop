@@ -43,6 +43,12 @@
     if ([e isARepeat]) return;
     const uint32_t ks = NESKeysymFromEvent(e);
     if (!ks) return;
+    /* While the emulated keyboard captures, every key is its key (Escape,
+     * Tab, F9/F11/F12 included); Cmd shortcuts stay the menus'. */
+    if (nessession_keyboard_captures(self.session)) {
+        if (!([e modifierFlags] & NSEventModifierFlagCommand)) nessession_key(self.session, ks, 1);
+        return;
+    }
     if (ks == NES_KEYSYM_F9) { [NESControllersWindow toggleWithSession:self.session]; return; }
     if (ks == NES_KEYSYM_F11) { [[self window] toggleFullScreen:nil]; return; }
     if (ks == NES_KEYSYM_F12) { [NESDebuggerWindow toggleForSession:self.session]; return; }
@@ -181,6 +187,7 @@
     if (getenv("NES_OPEN_CONTROLLERS")) [NESControllersWindow toggleWithSession:_session];
     if (getenv("NES_OPEN_DEBUGGER")) [NESDebuggerWindow showForSession:_session];
     if (getenv("NES_OPEN_SETTINGS")) [self showSettings:nil];
+    if (getenv("NES_OPEN_KEYBOARD")) [NESControllersWindow showKeyboardWithSession:_session];
 
     _statusTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES
         block:^(NSTimer *t) { (void)t; [self updateTitle]; }];
@@ -245,6 +252,14 @@
         if (cart && cart[0])
             state = [NSString stringWithFormat:@"%@ — %@",
                      [[NSString stringWithUTF8String:cart] lastPathComponent], state];
+    }
+    /* the expansion-port keyboard and its Data Recorder */
+    if (nessession_keyboard_captures(_session))
+        state = [state stringByAppendingString:@" — KBD"];
+    switch (nessession_tape_state(_session)) {
+    case NES_TAPE_PLAYING:   state = [state stringByAppendingString:@" — Tape: PLAY"]; break;
+    case NES_TAPE_RECORDING: state = [state stringByAppendingString:@" — Tape: REC"]; break;
+    default: break;
     }
     /* The title bar is the status bar here: an AppKit window has no natural
      * place for one, and a floating HUD over the picture would be worse. */
@@ -315,12 +330,21 @@
      * and could not be remapped. */
     [self item:machine title:@"Reset Game (⌫)" action:@selector(resetGame:) key:@""];
     [self item:machine title:@"Reset to CONFIG" action:@selector(resetConfig:) key:@"r"];
+    [machine addItem:[NSMenuItem separatorItem]];
+    /* A Mac has no Scroll Lock: Cmd+K toggles keyboard mode instead. */
+    [self item:machine title:@"Keyboard Mode" action:@selector(toggleKeyboardMode:) key:@"k"];
+    NSMenuItem *tapeItem = [machine addItemWithTitle:@"Data Recorder" action:NULL keyEquivalent:@""];
+    NSMenu *tape = [[NSMenu alloc] initWithTitle:@"Data Recorder"];
+    [self item:tape title:@"Play Tape…" action:@selector(playTape:) key:@""];
+    [self item:tape title:@"Record Tape…" action:@selector(recordTape:) key:@""];
+    [self item:tape title:@"Stop" action:@selector(stopTape:) key:@""];
+    [tapeItem setSubmenu:tape];
     [machineItem setSubmenu:machine];
     [bar addItem:machineItem];
 
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
-    [self item:view title:@"Controllers (F9)" action:@selector(toggleControllers:) key:@"k"];
+    [self item:view title:@"Controllers (F9)" action:@selector(toggleControllers:) key:@"j"];
     [self item:view title:@"Debugger (F12)" action:@selector(toggleDebugger:) key:@"d"];
     [view addItem:[NSMenuItem separatorItem]];
     _aspectItem = [self item:view title:@"TV Aspect (8:7 pixels)" action:@selector(toggleAspect:) key:@""];
@@ -414,6 +438,79 @@
 
 - (void)resetGame:(id)sender { (void)sender; nessession_reset_game(_session); }
 - (void)resetConfig:(id)sender { (void)sender; [self runSysaction:NES_SYSACT_RESET_CONFIG]; }
+
+/* ---- the expansion-port keyboard and the Data Recorder ---------------------- */
+
+- (void)toggleKeyboardMode:(id)sender
+{
+    (void)sender;
+    if (nessession_keyboard(_session) == NES_KBD_NONE) return;
+    nessession_set_keyboard_mode(_session, !nessession_keyboard_mode(_session));
+    [self updateTitle];
+}
+
+- (void)tapeResult:(int)rc title:(NSString *)title
+{
+    if (rc != 0)
+        [self alert:title text:[NSString stringWithUTF8String:nessession_last_error(_session)]];
+    [self updateTitle];
+}
+
+- (NSURL *)tapesURL
+{
+    const char *dir = nessession_tapes_path(_session);
+    return (dir && dir[0]) ? [NSURL fileURLWithPath:[NSString stringWithUTF8String:dir] isDirectory:YES] : nil;
+}
+
+- (void)playTape:(id)sender
+{
+    (void)sender;
+    NSOpenPanel *p = [NSOpenPanel openPanel];
+    [p setTitle:@"Play Tape"];
+    NSURL *dir = [self tapesURL];
+    if (dir) [p setDirectoryURL:dir];
+    if ([p runModal] != NSModalResponseOK) return;
+    [self tapeResult:nessession_tape_play(_session, [[[p URL] path] fileSystemRepresentation])
+               title:@"Could not play the tape"];
+}
+
+- (void)recordTape:(id)sender
+{
+    (void)sender;
+    NSSavePanel *p = [NSSavePanel savePanel];
+    [p setTitle:@"Record Tape"];
+    NSURL *dir = [self tapesURL];
+    if (dir) [p setDirectoryURL:dir];
+    [p setNameFieldStringValue:@"untitled.fbt"];
+    if ([p runModal] != NSModalResponseOK) return;
+    [self tapeResult:nessession_tape_record(_session, [[[p URL] path] fileSystemRepresentation])
+               title:@"Could not record a tape"];
+}
+
+- (void)stopTape:(id)sender
+{
+    (void)sender;
+    [self tapeResult:nessession_tape_stop(_session) title:@"Could not stop the tape"];
+}
+
+/* Keyboard Mode needs a keyboard; the Data Recorder comes with the Family
+ * BASIC keyboard only. The check mark follows the session (Scroll Lock on
+ * an external keyboard toggles it too). */
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+    const SEL a = [item action];
+    const int kbd = nessession_keyboard(_session);
+    if (a == @selector(toggleKeyboardMode:)) {
+        [item setState:(kbd != NES_KBD_NONE && nessession_keyboard_mode(_session))
+                       ? NSControlStateValueOn : NSControlStateValueOff];
+        return kbd != NES_KBD_NONE;
+    }
+    if (a == @selector(playTape:) || a == @selector(recordTape:))
+        return kbd == NES_KBD_FAMILY_BASIC;
+    if (a == @selector(stopTape:))
+        return kbd == NES_KBD_FAMILY_BASIC && nessession_tape_state(_session) != NES_TAPE_IDLE;
+    return YES;
+}
 
 - (void)toggleControllers:(id)sender { (void)sender; [NESControllersWindow toggleWithSession:_session]; }
 - (void)toggleDebugger:(id)sender { (void)sender; [NESDebuggerWindow toggleForSession:_session]; }
@@ -550,6 +647,11 @@
         nessession_set_region(_session, value);
         return;
     }
+    if (!strcmp(key, "keyboard")) {
+        nessession_set_keyboard(_session, value);
+        [self updateTitle];
+        return;
+    }
     if (!strcmp(key, "analog_joystick")) {
         nessession_set_analog(_session, value);
         return;
@@ -600,6 +702,8 @@
         @[ [NSTextField labelWithString:@""],
            [self checkBoxForKey:"analog_joystick" title:@"Analog sticks drive the D-pad" fallback:1] ],
         @[ [NSTextField labelWithString:@"Gamepads"], padRow ],
+        @[ [NSTextField labelWithString:@"Expansion port"],
+           [self popUpForKey:"keyboard" fallback:NES_KBD_NONE names:nes_keyboard_name] ],
         @[ [NSTextField labelWithString:@"Volume"], volume ],
         @[ [self sectionLabel:@"Host"], [self note:@"applied by restarting the session"] ],
         @[ [NSTextField labelWithString:@""], [self checkBoxForKey:"enable_fujinet" title:@"Enable FujiNet" fallback:1] ],
@@ -618,7 +722,7 @@
     root.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
 
     _settingsWindow = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 560, 480)
+        initWithContentRect:NSMakeRect(0, 0, 560, 520)
                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
                     backing:NSBackingStoreBuffered
                       defer:NO];

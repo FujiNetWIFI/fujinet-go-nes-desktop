@@ -19,6 +19,11 @@
  * (nessession_buttons_held) -- is painted in the accent colour, so the
  * window doubles as an input tester for a new gamepad.
  *
+ * The Keyboard page draws the keyboard on the expansion port from the
+ * session's layout (key units, so all four frontends show the same picture):
+ * clicking a key holds it while the mouse is down, and every held key --
+ * typed or clicked -- is lit the same way.
+ *
  * SINGLETON, hidden rather than destroyed, so a remap survives closing it.
  *
  * MAP MODE: the Map button arms a two-step rebind -- click any control to
@@ -34,6 +39,8 @@
 #include "controllers_window.h"
 
 #include "../window.h"
+
+#include <string.h>
 
 /* ---- singleton state ------------------------------------------------------ */
 
@@ -51,6 +58,18 @@ static GtkWidget *g_type_combo[2];
 static GtkWidget *g_pad_box;
 static unsigned g_pad_generation = (unsigned)-1;
 
+/* the Keyboard page */
+#define KBD_UNIT 36.0           /* pixels per key unit */
+#define KBD_GAP 2.0             /* between key caps */
+static GtkWidget *g_view_stack;
+static GtkWidget *g_kbd_stack;  /* the drawing, or the "no keyboard" placeholder */
+static GtkWidget *g_kbd_area;
+static GtkWidget *g_kbd_combo;
+static int g_kbd_type = -1;     /* what the page currently shows */
+static int g_kbd_mouse = -1;    /* the key index the mouse holds */
+static gboolean g_kbd_syncing;
+static unsigned char g_kbd_lit[128];
+
 typedef struct {
     GtkWidget *button;
     int target;
@@ -60,6 +79,7 @@ static control g_controls[NES_TARGET_COUNT];
 static int g_ncontrols;
 
 static void refresh_labels(void);
+static void refresh_keyboard(void);
 
 /* ---- pressing ------------------------------------------------------------- */
 
@@ -210,7 +230,10 @@ static gboolean held_tick(gpointer d)
     unsigned held[2];
     int i;
     (void)d;
-    if (!g_window || !gtk_widget_get_visible(g_window) || g_map_state != -2)
+    if (!g_window || !gtk_widget_get_visible(g_window))
+        return G_SOURCE_CONTINUE;
+    refresh_keyboard();
+    if (g_map_state != -2)
         return G_SOURCE_CONTINUE;
     held[0] = nessession_buttons_held(g_session, 0);
     held[1] = nessession_buttons_held(g_session, 1);
@@ -370,6 +393,208 @@ static gboolean pad_tick(gpointer d)
     return G_SOURCE_CONTINUE;
 }
 
+/* ---- the expansion-port keyboard ----------------------------------------- */
+
+static void layout_extent(int type, double *w, double *h)
+{
+    const nes_kbd_key *keys = NULL;
+    int n = nessession_keyboard_layout(type, &keys), i;
+    *w = *h = 0;
+    for (i = 0; i < n; i++) {
+        if (keys[i].x + keys[i].w > *w) *w = keys[i].x + keys[i].w;
+        if (keys[i].y + keys[i].h > *h) *h = keys[i].y + keys[i].h;
+    }
+}
+
+static void kbd_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer d)
+{
+    const nes_kbd_key *keys = NULL;
+    int n = nessession_keyboard_layout(g_kbd_type, &keys), i;
+    double ew, eh, ox, oy;
+    GdkRGBA fg;
+    PangoLayout *pl = gtk_widget_create_pango_layout(GTK_WIDGET(area), NULL);
+    PangoFontDescription *font = pango_font_description_from_string("Sans Bold 8");
+    (void)d;
+
+    gtk_widget_get_color(GTK_WIDGET(area), &fg);
+    layout_extent(g_kbd_type, &ew, &eh);
+    ox = (width - ew * KBD_UNIT) / 2;
+    oy = (height - eh * KBD_UNIT) / 2;
+    pango_layout_set_font_description(pl, font);
+    pango_layout_set_alignment(pl, PANGO_ALIGN_CENTER);
+    pango_layout_set_wrap(pl, PANGO_WRAP_WORD);
+
+    for (i = 0; i < n; i++) {
+        const nes_kbd_key *k = &keys[i];
+        double x = ox + k->x * KBD_UNIT + KBD_GAP / 2, y = oy + k->y * KBD_UNIT + KBD_GAP / 2;
+        double w = k->w * KBD_UNIT - KBD_GAP, h = k->h * KBD_UNIT - KBD_GAP;
+        gboolean lit = k->index >= 0 && k->index < (int)sizeof g_kbd_lit && g_kbd_lit[k->index];
+        int tw, th;
+
+        cairo_new_path(cr);
+        cairo_rectangle(cr, x, y, w, h);
+        if (lit)
+            cairo_set_source_rgb(cr, ((NESSESSION_ACCENT_RGB >> 16) & 0xFF) / 255.0,
+                                 ((NESSESSION_ACCENT_RGB >> 8) & 0xFF) / 255.0,
+                                 (NESSESSION_ACCENT_RGB & 0xFF) / 255.0);
+        else
+            cairo_set_source_rgba(cr, fg.red, fg.green, fg.blue, 0.08);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, fg.red, fg.green, fg.blue, 0.35);
+        cairo_set_line_width(cr, 1);
+        cairo_stroke(cr);
+
+        pango_layout_set_width(pl, (int)((w - 4) * PANGO_SCALE));
+        pango_layout_set_text(pl, k->label, -1);
+        pango_layout_get_pixel_size(pl, &tw, &th);
+        if (lit) cairo_set_source_rgb(cr, 0, 0, 0);
+        else gdk_cairo_set_source_rgba(cr, &fg);
+        cairo_move_to(cr, x + 2, y + (h - th) / 2);
+        pango_cairo_show_layout(cr, pl);
+    }
+    pango_font_description_free(font);
+    g_object_unref(pl);
+}
+
+static int kbd_hit(double px, double py)
+{
+    const nes_kbd_key *keys = NULL;
+    int n = nessession_keyboard_layout(g_kbd_type, &keys), i;
+    double ew, eh, x, y;
+    layout_extent(g_kbd_type, &ew, &eh);
+    x = (px - (gtk_widget_get_width(g_kbd_area) - ew * KBD_UNIT) / 2) / KBD_UNIT;
+    y = (py - (gtk_widget_get_height(g_kbd_area) - eh * KBD_UNIT) / 2) / KBD_UNIT;
+    for (i = 0; i < n; i++)
+        if (x >= keys[i].x && x < keys[i].x + keys[i].w &&
+            y >= keys[i].y && y < keys[i].y + keys[i].h)
+            return keys[i].index;
+    return -1;
+}
+
+static void kbd_release_mouse(void)
+{
+    if (g_kbd_mouse >= 0) {
+        nessession_keyboard_press(g_session, g_kbd_mouse, 0);
+        g_kbd_mouse = -1;
+        refresh_keyboard();
+    }
+}
+
+static void on_kbd_pressed(GtkGestureClick *g, int n, double x, double y, gpointer d)
+{
+    int idx = kbd_hit(x, y);
+    (void)g; (void)n; (void)d;
+    kbd_release_mouse();
+    if (idx < 0) return;
+    g_kbd_mouse = idx;
+    nessession_keyboard_press(g_session, idx, 1);
+    refresh_keyboard();
+}
+
+static void on_kbd_released(GtkGestureClick *g, int n, double x, double y, gpointer d)
+{
+    (void)g; (void)n; (void)x; (void)y; (void)d;
+    kbd_release_mouse();
+}
+
+static void on_kbd_cancelled(GtkGesture *g, GdkEventSequence *seq, gpointer d)
+{
+    (void)g; (void)seq; (void)d;
+    kbd_release_mouse();
+}
+
+static void on_kbd_type_changed(GObject *o, GParamSpec *ps, gpointer d)
+{
+    (void)ps; (void)d;
+    if (g_kbd_syncing) return;
+    kbd_release_mouse();
+    nessession_set_keyboard(g_session, (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(o)));
+    refresh_keyboard();
+}
+
+/* Follows the session: the type can change in Preferences, and keys are
+ * held from the host keyboard too. Redraws only when something changed. */
+static void refresh_keyboard(void)
+{
+    int type = nessession_keyboard(g_session), i, changed = 0;
+    if (!g_kbd_area) return;
+    if (type != g_kbd_type) {
+        double w, h;
+        g_kbd_mouse = -1;       /* changing keyboards let go of everything */
+        g_kbd_type = type;
+        g_kbd_syncing = TRUE;
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(g_kbd_combo), (guint)type);
+        g_kbd_syncing = FALSE;
+        layout_extent(type, &w, &h);
+        gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(g_kbd_area), (int)(w * KBD_UNIT + 0.999));
+        gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(g_kbd_area), (int)(h * KBD_UNIT + 0.999));
+        gtk_stack_set_visible_child_name(GTK_STACK(g_kbd_stack),
+                                         type == NES_KBD_NONE ? "none" : "keys");
+        memset(g_kbd_lit, 0, sizeof g_kbd_lit);
+        changed = 1;
+    }
+    if (type != NES_KBD_NONE)
+        for (i = 0; i < (int)sizeof g_kbd_lit; i++) {
+            unsigned char on = nessession_keyboard_held(g_session, i) ? 1 : 0;
+            if (on != g_kbd_lit[i]) { g_kbd_lit[i] = on; changed = 1; }
+        }
+    if (changed) gtk_widget_queue_draw(g_kbd_area);
+}
+
+static GtkWidget *build_keyboard_page(void)
+{
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *label = gtk_label_new("Expansion port:");
+    GtkWidget *placeholder, *hint;
+    GtkGesture *g;
+    const char *names[NES_KBD_COUNT + 1];
+    int i;
+
+    for (i = 0; i < NES_KBD_COUNT; i++) names[i] = nes_keyboard_name(i);
+    names[NES_KBD_COUNT] = NULL;
+    gtk_widget_add_css_class(label, "dim-label");
+    g_kbd_combo = gtk_drop_down_new_from_strings(names);
+    g_signal_connect(g_kbd_combo, "notify::selected", G_CALLBACK(on_kbd_type_changed), NULL);
+    gtk_box_append(GTK_BOX(row), label);
+    gtk_box_append(GTK_BOX(row), g_kbd_combo);
+    gtk_widget_set_halign(row, GTK_ALIGN_CENTER);
+
+    g_kbd_area = gtk_drawing_area_new();
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(g_kbd_area), kbd_draw, NULL, NULL);
+    g = gtk_gesture_click_new();
+    g_signal_connect(g, "pressed", G_CALLBACK(on_kbd_pressed), NULL);
+    g_signal_connect(g, "released", G_CALLBACK(on_kbd_released), NULL);
+    g_signal_connect(g, "cancel", G_CALLBACK(on_kbd_cancelled), NULL);
+    gtk_widget_add_controller(g_kbd_area, GTK_EVENT_CONTROLLER(g));
+
+    placeholder = gtk_label_new("No keyboard attached \xe2\x80\x94 choose one in Preferences");
+    gtk_widget_add_css_class(placeholder, "dim-label");
+    gtk_widget_set_vexpand(placeholder, TRUE);
+
+    g_kbd_stack = gtk_stack_new();
+    gtk_stack_add_named(GTK_STACK(g_kbd_stack), g_kbd_area, "keys");
+    gtk_stack_add_named(GTK_STACK(g_kbd_stack), placeholder, "none");
+    gtk_widget_set_vexpand(g_kbd_stack, TRUE);
+
+    hint = gtk_label_new("Click a key to press it. Scroll Lock switches typing between "
+                         "the keyboard and the controllers.");
+    gtk_widget_add_css_class(hint, "dim-label");
+    gtk_label_set_wrap(GTK_LABEL(hint), TRUE);
+
+    gtk_box_append(GTK_BOX(box), row);
+    gtk_box_append(GTK_BOX(box), g_kbd_stack);
+    gtk_box_append(GTK_BOX(box), hint);
+    gtk_widget_set_margin_top(box, 12);
+    gtk_widget_set_margin_bottom(box, 12);
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+
+    g_kbd_type = -1;
+    refresh_keyboard();
+    return box;
+}
+
 /* ---- keyboard ------------------------------------------------------------- */
 
 static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval,
@@ -392,6 +617,11 @@ static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval,
         return TRUE;
     }
     if (g_map_state == -1) return TRUE;
+    /* typing goes to the expansion-port keyboard: F9 and Escape included */
+    if (nessession_keyboard_captures(g_session)) {
+        nessession_key(g_session, keysym, 1);
+        return TRUE;
+    }
     if (keyval == GDK_KEY_F9) {
         nes_controllers_window_toggle(NULL, g_session);
         return TRUE;
@@ -434,6 +664,7 @@ static gboolean on_close(GtkWindow *w, gpointer d)
 {
     (void)d;
     set_map_state(-2);
+    kbd_release_mouse();
     gtk_widget_set_visible(GTK_WIDGET(w), FALSE);
     return TRUE;
 }
@@ -441,6 +672,8 @@ static gboolean on_close(GtkWindow *w, gpointer d)
 static void build_window(GtkWindow *parent)
 {
     GtkWidget *root, *ports, *system, *maprow, *toolbar, *header, *defaults, *systitle, *padtitle;
+    GtkWidget *switcher;
+    AdwViewStackPage *page;
     GtkEventController *keys;
 
     g_window = adw_window_new();
@@ -495,10 +728,21 @@ static void build_window(GtkWindow *parent)
     gtk_box_append(GTK_BOX(maprow), g_map_hint);
     gtk_box_append(GTK_BOX(root), maprow);
 
+    g_view_stack = adw_view_stack_new();
+    page = adw_view_stack_add_titled(ADW_VIEW_STACK(g_view_stack), root, "controllers", "Controllers");
+    adw_view_stack_page_set_icon_name(page, "input-gaming-symbolic");
+    page = adw_view_stack_add_titled(ADW_VIEW_STACK(g_view_stack), build_keyboard_page(),
+                                     "keyboard", "Keyboard");
+    adw_view_stack_page_set_icon_name(page, "input-keyboard-symbolic");
+
     header = adw_header_bar_new();
+    switcher = adw_view_switcher_new();
+    adw_view_switcher_set_stack(ADW_VIEW_SWITCHER(switcher), ADW_VIEW_STACK(g_view_stack));
+    adw_view_switcher_set_policy(ADW_VIEW_SWITCHER(switcher), ADW_VIEW_SWITCHER_POLICY_WIDE);
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), switcher);
     toolbar = adw_toolbar_view_new();
     adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
-    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), root);
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), g_view_stack);
     adw_window_set_content(ADW_WINDOW(g_window), toolbar);
 
     keys = gtk_event_controller_key_new();
@@ -512,6 +756,19 @@ static void build_window(GtkWindow *parent)
     set_map_state(-2);
 }
 
+static void show_window(void)
+{
+    int port;
+    for (port = 0; port < 2; port++)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(g_type_combo[port]),
+                                   (guint)nessession_port_type(g_session, port));
+    g_pad_generation = (unsigned)-1;
+    pad_tick(NULL);
+    refresh_keyboard();
+    gtk_window_present(GTK_WINDOW(g_window));
+    pad_tick(NULL);
+}
+
 void nes_controllers_window_toggle(GtkWindow *parent, nessession *session)
 {
     g_session = session;
@@ -520,17 +777,20 @@ void nes_controllers_window_toggle(GtkWindow *parent, nessession *session)
 
     if (gtk_widget_get_visible(g_window)) {
         set_map_state(-2);
+        kbd_release_mouse();
         gtk_widget_set_visible(g_window, FALSE);
     } else {
-        int port;
-        for (port = 0; port < 2; port++)
-            gtk_drop_down_set_selected(GTK_DROP_DOWN(g_type_combo[port]),
-                                       (guint)nessession_port_type(g_session, port));
-        g_pad_generation = (unsigned)-1;
-        pad_tick(NULL);
-        gtk_window_present(GTK_WINDOW(g_window));
-        pad_tick(NULL);
+        show_window();
     }
+}
+
+void nes_controllers_window_show_keyboard(GtkWindow *parent, nessession *session)
+{
+    g_session = session;
+    if (!g_window)
+        build_window(parent);
+    adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(g_view_stack), "keyboard");
+    show_window();
 }
 
 gboolean nes_controllers_window_is_visible(void)

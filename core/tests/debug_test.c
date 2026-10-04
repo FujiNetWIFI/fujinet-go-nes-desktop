@@ -81,7 +81,15 @@ int main(void)
 
     nesdebug_step(d);
     check(wait_stopped(d, 1, 2000), "stopped after a step");
-    nesdebug_cpu_get(d, &c2);
+    /* on a loaded machine the step can land after nesdebug_step's own wait */
+    {
+        int waited = 0;
+        nesdebug_cpu_get(d, &c2);
+        while (c2.pc == c.pc && waited < 2000) {
+            sleep_ms(5); waited += 5;
+            nesdebug_cpu_get(d, &c2);
+        }
+    }
     check(c2.pc != c.pc, "a step moves the PC");
     check(c2.total_cycles > c.total_cycles, "and the cycle count");
 

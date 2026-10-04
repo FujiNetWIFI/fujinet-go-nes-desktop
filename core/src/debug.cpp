@@ -772,6 +772,23 @@ extern "C" void nesdebug_apu_get(nesdebug* d, nesdebug_apu* out)
     out->pad[0] = h->GetButtons(0);
     out->pad[1] = h->GetButtons(1);
   }
+  if(d && d->session->running)
+  {
+    out->keyboard = nessession_keyboard(d->session);
+    out->tape = nessession_tape_state(d->session);
+    const nes_kbd_key* keys = nullptr;
+    const int n = nessession_keyboard_layout(out->keyboard, &keys);
+    std::string held;
+    std::vector<int> seen;
+    for(int i = 0; i < n; i++)
+    {
+      if(std::find(seen.begin(), seen.end(), keys[i].index) != seen.end()) continue;
+      seen.push_back(keys[i].index);
+      if(nessession_keyboard_held(d->session, keys[i].index))
+        held += (held.empty() ? "" : " ") + std::string(keys[i].label);
+    }
+    snprintf(out->keys_held, sizeof out->keys_held, "%s", held.c_str());
+  }
 }
 
 // ---- memory ------------------------------------------------------------------

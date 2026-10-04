@@ -14,6 +14,10 @@
  * Whatever holds a button -- the keyboard, a gamepad or a click here -- the
  * button lights up in the accent colour, from nessession_buttons_held.
  *
+ * Below the gamepads, the keyboard on the expansion port (Family BASIC or
+ * Subor), drawn from nessession_keyboard_layout: click a key to hold it,
+ * and every held key -- typed or clicked -- lights in the accent colour.
+ *
  * A utility panel of fixed size (no resize mask). Singleton, ordered out
  * rather than closed, so its position survives.
  *
@@ -24,6 +28,8 @@
 #import "ControllersWindow.h"
 
 #import "../KeyForward.h"
+
+#include <string.h>
 
 /* -2 idle, -1 armed and waiting for a target, >= 0 waiting for a key or
  * pad button. */
@@ -87,6 +93,160 @@ static nessession *g_session;
 }
 @end
 
+/* ---- the on-screen keyboard ------------------------------------------------------
+ *
+ * Layouts are in key units with y = 0 at the top, so the view is flipped and
+ * a unit is however many points make the widest keyboard fit. */
+#define KBD_MAX_KEYS 128
+
+@interface NESKeyboardView : NSView
+- (void)reload;          /* the attached keyboard changed */
+- (void)updateHeld;      /* the timer: repaint when a key goes up or down */
+- (void)releaseMouse;
+@end
+
+@implementation NESKeyboardView {
+    int _type;
+    const nes_kbd_key *_keys;
+    int _count;
+    int _indices;                 /* highest index + 1 */
+    CGFloat _unitsW, _unitsH;     /* the layout's extent */
+    BOOL _held[KBD_MAX_KEYS];
+    int _pressed;                 /* the index the mouse holds, or -1 */
+}
+
+- (instancetype)initWithFrame:(NSRect)frame
+{
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    _type = -1;
+    _pressed = -1;
+    return self;
+}
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { (void)e; return YES; }
+
+- (void)reload
+{
+    const int type = nessession_keyboard(g_session);
+    if (type == _type) return;
+    [self releaseMouse];
+    _type = type;
+    _keys = NULL;
+    _count = nessession_keyboard_layout(type, &_keys);
+    _indices = 0;
+    _unitsW = _unitsH = 0;
+    for (int i = 0; i < _count; i++) {
+        if (_keys[i].index + 1 > _indices) _indices = _keys[i].index + 1;
+        if (_keys[i].x + _keys[i].w > _unitsW) _unitsW = _keys[i].x + _keys[i].w;
+        if (_keys[i].y + _keys[i].h > _unitsH) _unitsH = _keys[i].y + _keys[i].h;
+    }
+    if (_indices > KBD_MAX_KEYS) _indices = KBD_MAX_KEYS;
+    memset(_held, 0, sizeof _held);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)updateHeld
+{
+    [self reload];
+    BOOL changed = NO;
+    for (int i = 0; i < _indices; i++) {
+        const BOOL h = nessession_keyboard_held(g_session, i) != 0;
+        if (h != _held[i]) { _held[i] = h; changed = YES; }
+    }
+    if (changed) [self setNeedsDisplay:YES];
+}
+
+/* Points per key unit, and the top-left that centres the keyboard. */
+- (CGFloat)unitWithOrigin:(NSPoint *)origin
+{
+    const NSRect b = [self bounds];
+    if (_unitsW <= 0 || _unitsH <= 0) { *origin = NSZeroPoint; return 0; }
+    CGFloat u = MIN(b.size.width / _unitsW, b.size.height / _unitsH);
+    if (u > 32) u = 32;
+    *origin = NSMakePoint(floor((b.size.width - _unitsW * u) / 2), floor((b.size.height - _unitsH * u) / 2));
+    return u;
+}
+
+- (NSRect)rectForKey:(const nes_kbd_key *)k unit:(CGFloat)u origin:(NSPoint)o
+{
+    return NSMakeRect(o.x + k->x * u + 1, o.y + k->y * u + 1, k->w * u - 2, k->h * u - 2);
+}
+
+- (void)drawRect:(NSRect)dirty
+{
+    (void)dirty;
+    if (_count == 0) {
+        NSDictionary *attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:12],
+                                 NSForegroundColorAttributeName: [NSColor secondaryLabelColor] };
+        NSString *text = @"No keyboard on the expansion port";
+        const NSSize sz = [text sizeWithAttributes:attrs];
+        const NSRect b = [self bounds];
+        [text drawAtPoint:NSMakePoint((b.size.width - sz.width) / 2, (b.size.height - sz.height) / 2)
+           withAttributes:attrs];
+        return;
+    }
+    NSPoint o;
+    const CGFloat u = [self unitWithOrigin:&o];
+    NSFont *font = [NSFont systemFontOfSize:MAX(7.0, floor(u * 0.38))];
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    para.lineBreakMode = NSLineBreakByClipping;
+    for (int i = 0; i < _count; i++) {
+        const nes_kbd_key *k = &_keys[i];
+        const NSRect r = [self rectForKey:k unit:u origin:o];
+        const BOOL lit = k->index >= 0 && k->index < _indices && (_held[k->index] || k->index == _pressed);
+        NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:r xRadius:3 yRadius:3];
+        [(lit ? NESAccentColor() : [NSColor controlColor]) setFill];
+        [path fill];
+        [[NSColor separatorColor] setStroke];
+        [path stroke];
+        if (!k->label) continue;
+        NSDictionary *attrs = @{ NSFontAttributeName: font,
+                                 NSParagraphStyleAttributeName: para,
+                                 NSForegroundColorAttributeName: lit ? [NSColor whiteColor] : [NSColor labelColor] };
+        NSString *label = [NSString stringWithUTF8String:k->label];
+        if (!label) continue;
+        const CGFloat th = [label sizeWithAttributes:attrs].height;
+        [label drawInRect:NSMakeRect(r.origin.x, r.origin.y + (r.size.height - th) / 2, r.size.width, th)
+           withAttributes:attrs];
+    }
+}
+
+- (void)mouseDown:(NSEvent *)e
+{
+    if (g_mapState != -2 || _count == 0) return;
+    NSPoint o;
+    const CGFloat u = [self unitWithOrigin:&o];
+    const NSPoint p = [self convertPoint:[e locationInWindow] fromView:nil];
+    for (int i = 0; i < _count; i++) {
+        if (!NSPointInRect(p, [self rectForKey:&_keys[i] unit:u origin:o])) continue;
+        [self releaseMouse];
+        _pressed = _keys[i].index;
+        nessession_keyboard_press(g_session, _pressed, 1);
+        [self setNeedsDisplay:YES];
+        return;
+    }
+}
+
+/* mouseUp comes to the view that got mouseDown wherever the pointer went,
+ * so a drag off the key still lets it go. */
+- (void)mouseUp:(NSEvent *)e
+{
+    (void)e;
+    [self releaseMouse];
+}
+
+- (void)releaseMouse
+{
+    if (_pressed < 0) return;
+    nessession_keyboard_press(g_session, _pressed, 0);
+    _pressed = -1;
+    [self setNeedsDisplay:YES];
+}
+@end
+
 @implementation NESControllersWindow {
     NSMutableArray<PadButton *> *_buttons;
     NSButton *_mapButton;
@@ -98,6 +258,8 @@ static nessession *g_session;
     unsigned _padGeneration;
     NSTimer *_captureTimer;
     NSTimer *_liveTimer;
+    NSPopUpButton *_kbdPopup;
+    NESKeyboardView *_kbdView;
 }
 
 #define KEY_W   60.0
@@ -112,6 +274,7 @@ static nessession *g_session;
 #define PAD_H  (3 * KEY_H + 2 * GAP)
 #define MARGIN  12.0
 #define ROW_H   26.0
+#define KBD_H  170.0       /* the keyboard picture: 6 rows of ~26 pt keys */
 
 - (PadButton *)buttonWithFace:(NSString *)face target:(int)target frame:(NSRect)frame
 {
@@ -192,6 +355,7 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
         + 2 * (ROW_H + GAP + PAD_H + MARGIN)      /* the two controllers */
         + KEY_H + MARGIN                          /* console row */
         + 18 + MAX_PAD_ROWS * ROW_H + MARGIN      /* gamepads */
+        + ROW_H + GAP + KBD_H + MARGIN            /* keyboard */
         + 30 + MARGIN;                            /* map row */
 
     NSPanel *win = [[NSPanel alloc]
@@ -253,6 +417,23 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
     }
     y -= MAX_PAD_ROWS * ROW_H + MARGIN;
 
+    /* The keyboard on the expansion port, and the choice of it. */
+    NSTextField *kbd = [NSTextField labelWithString:@"Keyboard"];
+    [kbd setFont:[NSFont boldSystemFontOfSize:12]];
+    [kbd setFrame:NSMakeRect(MARGIN, y - 20, 80, 16)];
+    [content addSubview:kbd];
+    _kbdPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(MARGIN + 90, y - 24, 220, 24)];
+    for (int i = 0; nes_keyboard_name(i); i++)
+        [_kbdPopup addItemWithTitle:[NSString stringWithUTF8String:nes_keyboard_name(i)]];
+    _kbdPopup.target = self;
+    _kbdPopup.action = @selector(keyboardChanged:);
+    [_kbdPopup setRefusesFirstResponder:YES];
+    [content addSubview:_kbdPopup];
+    y -= ROW_H + GAP;
+    _kbdView = [[NESKeyboardView alloc] initWithFrame:NSMakeRect(MARGIN, y - KBD_H, PAD_W, KBD_H)];
+    [content addSubview:_kbdView];
+    y -= KBD_H + MARGIN;
+
     _mapButton = [NSButton buttonWithTitle:@"Map" target:self action:@selector(toggleMap:)];
     [_mapButton setFrame:NSMakeRect(MARGIN, y - 30, 70, 30)];
     [_mapButton setRefusesFirstResponder:YES];
@@ -284,6 +465,12 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
     nessession_set_port_type(g_session, (int)sender.tag, (int)sender.indexOfSelectedItem);
 }
 
+- (void)keyboardChanged:(NSPopUpButton *)sender
+{
+    nessession_set_keyboard(g_session, (int)sender.indexOfSelectedItem);
+    [_kbdView updateHeld];
+}
+
 - (void)padAssignChanged:(NSPopUpButton *)sender
 {
     nessession_gamepad_assign(g_session, (int)sender.tag, (int)sender.indexOfSelectedItem - 1);
@@ -310,6 +497,16 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
     }
     for (int port = 0; port < 2; port++)
         [_typePopup[port] selectItemAtIndex:nessession_port_type(g_session, port)];
+    [self refreshKeyboard];
+}
+
+/* The popup and the picture follow the session (Settings changes it too). */
+- (void)refreshKeyboard
+{
+    const int type = nessession_keyboard(g_session);
+    if (type >= 0 && type < (int)_kbdPopup.numberOfItems && type != (int)_kbdPopup.indexOfSelectedItem)
+        [_kbdPopup selectItemAtIndex:type];
+    [_kbdView updateHeld];
 }
 
 /* The live part, twenty times a second while the panel is up: what is held,
@@ -317,6 +514,7 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
 - (void)tick
 {
     if (nessession_gamepad_generation(g_session) != _padGeneration) [self refreshPads];
+    [self refreshKeyboard];
     if (g_mapState != -2) return;
     const unsigned held[2] = { nessession_buttons_held(g_session, 0), nessession_buttons_held(g_session, 1) };
     for (PadButton *b in _buttons) {
@@ -431,6 +629,12 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
         return;
     }
     if (g_mapState == -1 || !ks) return;
+    /* While the emulated keyboard captures, F9 and Escape are its keys too;
+     * Cmd shortcuts stay the menus'. */
+    if (nessession_keyboard_captures(g_session)) {
+        if (!([e modifierFlags] & NSEventModifierFlagCommand)) nessession_key(g_session, ks, 1);
+        return;
+    }
     if (ks == NES_KEYSYM_F9) { [NESControllersWindow toggleWithSession:g_session]; return; }
 
     const int sa = nessession_key_sysaction(g_session, ks);
@@ -469,6 +673,7 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
 - (void)hidePanel
 {
     [self setMapState:-2];
+    [_kbdView releaseMouse];
     [_liveTimer invalidate];
     _liveTimer = nil;
     nessession_release_all(g_session);
@@ -497,6 +702,13 @@ static NSRect cell(CGFloat x, CGFloat top, int col, int row, CGFloat w)
         }];
         [[g_singleton window] makeKeyAndOrderFront:nil];
     }
+}
+
++ (void)showKeyboardWithSession:(nessession *)session
+{
+    /* The keyboard is a section of the panel, always on show: opening the
+     * panel opens it on the keyboard. */
+    if (![self isVisible]) [self toggleWithSession:session];
 }
 
 + (BOOL)isVisible

@@ -101,13 +101,15 @@ typedef struct {
     int region;               /* nes_region */
     int port_type[2];         /* nes_ctrl_type per port (0 = player 1) */
     int analog_joystick;      /* gamepad sticks drive the D-pad too */
+    int keyboard;             /* nes_keyboard on the expansion port */
     int enable_fujinet;       /* start the in-process FujiNet runtime */
     int enable_audio;         /* open the SDL audio device */
     int enable_gamepad;       /* start the SDL gamepad thread */
 } nessession_start_opts;
 
 /* Fills opts from the settings store (keys: cart region port0_type
- * port1_type analog_joystick enable_fujinet enable_audio enable_gamepad). */
+ * port1_type analog_joystick keyboard enable_fujinet enable_audio
+ * enable_gamepad). */
 void nessession_default_opts(nessession *s, nessession_start_opts *opts);
 
 /* Starts FujiNet (if enabled) and then the emulator.
@@ -242,7 +244,8 @@ enum {
     NES_KEYSYM_KP_3, NES_KEYSYM_KP_4, NES_KEYSYM_KP_5, NES_KEYSYM_KP_6,
     NES_KEYSYM_KP_7, NES_KEYSYM_KP_8, NES_KEYSYM_KP_9,
     NES_KEYSYM_KP_ENTER = 0xff8d, NES_KEYSYM_KP_MULTIPLY = 0xffaa,
-    NES_KEYSYM_KP_DIVIDE = 0xffaf, NES_KEYSYM_KP_PERIOD = 0xffae
+    NES_KEYSYM_KP_DIVIDE = 0xffaf, NES_KEYSYM_KP_PERIOD = 0xffae,
+    NES_KEYSYM_SCROLL_LOCK = 0xff14
 };
 /* Native key codes for the platforms whose toolkits do not deliver keysyms:
  * Windows scan code (set 1, with the E0 flag), Linux evdev code (GTK/Qt
@@ -316,6 +319,62 @@ void nessession_set_analog(nessession *s, int joystick);
 /* ---- region (live; takes effect at the next power cycle) ------------------*/
 void nessession_set_region(nessession *s, int region);
 int  nessession_region(nessession *s);
+
+/* ---- the expansion port: keyboards and the Data Recorder ----------------
+ * The Famicom's expansion port takes a keyboard: Nintendo's Family BASIC
+ * Keyboard (HVC-007, 72 keys; its Data Recorder comes with it) or the Subor
+ * keyboard (the Famiclone educational keyboard, 99 keys). Both are scanned
+ * by the program through $4016/$4017. Persisted as "keyboard"; changing it
+ * is live. */
+typedef enum {
+    NES_KBD_NONE = 0, NES_KBD_FAMILY_BASIC, NES_KBD_SUBOR, NES_KBD_COUNT
+} nes_keyboard;
+const char *nes_keyboard_name(int type);    /* NULL past the end */
+void nessession_set_keyboard(nessession *s, int type);
+int  nessession_keyboard(nessession *s);
+
+/* Keyboard mode: while a keyboard is attached and the mode is on (it turns
+ * on when one is attached), every key typed on the host goes to the
+ * emulated keyboard -- by position, not by legend, so Shift and the NES
+ * software decide what a key means -- instead of to the controller
+ * bindings. Scroll Lock toggles the mode (nessession_key handles it, so
+ * every frontend behaves alike); macOS, which has no Scroll Lock, uses a
+ * menu item. Gamepads keep driving the controllers either way. */
+void nessession_set_keyboard_mode(nessession *s, int on);
+int  nessession_keyboard_mode(nessession *s);
+/* 1 while keys go to the emulated keyboard: a frontend then forwards every
+ * key (Escape, Backspace, Tab, F-keys included) to nessession_key and keeps
+ * only its Ctrl/Cmd menu accelerators. */
+int  nessession_keyboard_captures(nessession *s);
+
+/* The on-screen keyboard. A layout is the keyboard's keys in key units
+ * (x, y of the top-left corner; w, h), so every frontend draws the same
+ * picture. `index` is what keyboard_press / keyboard_held take. Returns the
+ * count; 0 for NES_KBD_NONE. */
+typedef struct {
+    const char *label;
+    int index;
+    float x, y, w, h;
+} nes_kbd_key;
+int  nessession_keyboard_layout(int type, const nes_kbd_key **keys);
+/* Press/release a key on the attached keyboard (the mouse on the on-screen
+ * keyboard). Held keys from the host keyboard and from here combine. */
+void nessession_keyboard_press(nessession *s, int index, int down);
+int  nessession_keyboard_held(nessession *s, int index);
+/* The attached keyboard's key index for a host keysym, or -1: what
+ * keyboard mode does with a key. */
+int  nessession_keyboard_index_for_keysym(int type, uint32_t keysym);
+
+/* The Family BASIC Data Recorder (with the Family BASIC keyboard only):
+ * Play feeds a tape file to the program reading $4016; Record captures
+ * what the program writes until Stop, which saves it. Tapes are raw bit
+ * streams, by default in nessession_tapes_path(). Return 0 or -1 + error. */
+typedef enum { NES_TAPE_IDLE = 0, NES_TAPE_PLAYING, NES_TAPE_RECORDING } nes_tape_state;
+int  nessession_tape_play(nessession *s, const char *path);
+int  nessession_tape_record(nessession *s, const char *path);
+int  nessession_tape_stop(nessession *s);
+int  nessession_tape_state(nessession *s);
+const char *nessession_tapes_path(const nessession *s);
 
 /* ---- gamepads (SDL, hotplugged; started by nessession_start) -------------
  * Pads are assigned to ports in connection order unless assigned

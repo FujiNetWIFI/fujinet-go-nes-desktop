@@ -126,6 +126,9 @@ typedef struct {
     int dmc_enabled, dmc_bytes_left;
     int frame_irq, dmc_irq;
     uint8_t pad[2];          /* buttons held, bit 0 = A ... 7 = Right */
+    int keyboard;            /* nes_keyboard on the expansion port */
+    int tape;                /* nes_tape_state */
+    char keys_held[96];      /* the keyboard's held keys, space-separated labels */
 } nesdebug_apu;
 void nesdebug_apu_get(nesdebug *d, nesdebug_apu *out);
 

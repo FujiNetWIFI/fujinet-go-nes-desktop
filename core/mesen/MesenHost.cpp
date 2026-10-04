@@ -28,6 +28,10 @@
 #include "Shared/Video/VideoRenderer.h"
 #include "Debugger/DebugTypes.h"
 #include "NES/Mappers/Homebrew/FujiNetCart.h"
+#include "Shared/BaseControlManager.h"
+#include "Shared/BaseControlDevice.h"
+#include "Shared/Interfaces/IConsole.h"
+#include "Shared/Interfaces/ITapeRecorder.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/VirtualFile.h"
 
@@ -59,14 +63,22 @@ const uint32_t DefaultPalette[64] = {
 	0xFFE4E594, 0xFFCFEF96, 0xFFBDF4AB, 0xFFB3F3CC, 0xFFB5EBF2, 0xFFB8B8B8, 0xFF000000, 0xFF000000,
 };
 
-// Virtual key codes: 1 + port * KeysPerPort + nes_action. 0 means "unbound"
-// to Mesen, so codes start at 1.
+// Virtual key codes: 1 + port * KeysPerPort + nes_action for the two
+// controllers (0 means "unbound" to Mesen, so codes start at 1), then
+// KeyboardBase + key index for the expansion-port keyboard.
 constexpr int KeysPerPort = 16;
-constexpr int KeyCount = 1 + 2 * KeysPerPort;
+constexpr int KeyboardBase = 64;
+constexpr int KeyboardKeys = 128;
+constexpr int KeyCount = KeyboardBase + KeyboardKeys;
 
 uint16_t KeyCode(int port, int action)
 {
 	return (uint16_t)(1 + port * KeysPerPort + action);
+}
+
+uint16_t KeyboardCode(int index)
+{
+	return (uint16_t)(KeyboardBase + index);
 }
 
 } // namespace
@@ -383,7 +395,18 @@ void MesenHost::ApplySettings()
 	};
 	setPort(nes.Port1, 0, _config.portType[0]);
 	setPort(nes.Port2, 1, _config.portType[1]);
+	// The expansion port: a keyboard, its every key on its own virtual code
+	// (Mesen reads KeyMapping.CustomKeys[key index]). The Family BASIC
+	// keyboard brings its Data Recorder with it.
 	nes.ExpPort = {};
+	switch(_config.keyboard) {
+		case 1: nes.ExpPort.Type = ControllerType::FamilyBasicKeyboard; break;
+		case 2: nes.ExpPort.Type = ControllerType::SuborKeyboard; break;
+		default: nes.ExpPort.Type = ControllerType::None; break;
+	}
+	for(int i = 0; i < KeyboardKeys && i < 100; i++) {
+		nes.ExpPort.Keys.Mapping1.CustomKeys[i] = KeyboardCode(i);
+	}
 	nes.MapperInput = {};
 	settings->SetNesConfig(nes);
 }
@@ -659,6 +682,62 @@ void MesenHost::SetPortType(int port, int type)
 		auto lock = _emu->AcquireLock();
 		ApplySettings();
 	}
+}
+
+void MesenHost::SetKeyboard(int type)
+{
+	_config.keyboard = type;
+	if(_keys) {
+		for(int i = 0; i < KeyboardKeys; i++) {
+			_keys->Set(KeyboardCode(i), false);
+		}
+	}
+	if(_started) {
+		// Mesen re-reads the devices between frames
+		auto lock = _emu->AcquireLock();
+		ApplySettings();
+	}
+}
+
+void MesenHost::SetKeyboardKey(int index, bool down)
+{
+	if(_keys && index >= 0 && index < KeyboardKeys) {
+		_keys->Set(KeyboardCode(index), down);
+	}
+}
+
+bool MesenHost::KeyboardKeyHeld(int index)
+{
+	return _keys && index >= 0 && index < KeyboardKeys && _keys->IsKeyPressed(KeyboardCode(index));
+}
+
+bool MesenHost::Tape(int action, const std::string& path)
+{
+	if(!_started || !_emu->IsRunning()) {
+		return false;
+	}
+	shared_ptr<IConsole> console = _emu->GetConsole();
+	if(!console || !console->GetControlManager()->GetControlDevice<ITapeRecorder>()) {
+		return false;
+	}
+	_emu->ProcessTapeRecorderAction((TapeRecorderAction)action, path);
+	return true;
+}
+
+int MesenHost::TapeState()
+{
+	if(!_started || !_emu->IsRunning()) {
+		return 0;
+	}
+	shared_ptr<IConsole> console = _emu->GetConsole();
+	shared_ptr<ITapeRecorder> recorder = console ? console->GetControlManager()->GetControlDevice<ITapeRecorder>() : nullptr;
+	if(!recorder) {
+		return 0;
+	}
+	if(recorder->IsRecording()) {
+		return 2;
+	}
+	return recorder->IsPlaying() ? 1 : 0;
 }
 
 void MesenHost::SetRegion(int region)

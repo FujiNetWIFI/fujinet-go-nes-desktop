@@ -444,7 +444,10 @@ int nessession_keysym_name(uint32_t keysym, char *dst, int dstsz)
 
 int nessession_key_sysaction(nessession *s, uint32_t keysym)
 {
-    int t = nessession_target_for_key(s, keysym);
+    int t;
+    /* while typing into the NES keyboard, Escape is its ESC key */
+    if (s && nessession_keyboard_captures(s)) return -1;
+    t = nessession_target_for_key(s, keysym);
     if (t < NES_TARGET_SYSACT(0)) return -1;
     return t - NES_TARGET_SYSACT(0);
 }
@@ -455,6 +458,8 @@ int nessession_key(nessession *s, uint32_t keysym, int down)
     int t;
 
     if (!s) return 0;
+    /* keyboard mode (and Scroll Lock, its toggle) first */
+    if (session_keyboard_key(s, keysym, down)) return 1;
     if (down) {
         int hit = 0;
         /* every target the key drives; a system action is the frontend's
@@ -492,6 +497,7 @@ void nessession_release_all(nessession *s)
 {
     int t;
     if (!s) return;
+    session_keyboard_release_all(s);
     for (t = 0; t < NES_TARGET_COUNT; t++) {
         if (s->held_keysym[t]) {
             s->held_keysym[t] = 0;

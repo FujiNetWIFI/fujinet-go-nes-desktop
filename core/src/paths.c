@@ -146,6 +146,11 @@ int paths_init(struct nessession *s, const char *config_dir,
     }
     /* Mesen's home folder: where its core keeps saves and debugger
      * workspaces (FolderUtilities). */
+    snprintf(s->tapes_dir, sizeof s->tapes_dir, "%s/tapes", s->data_dir);
+    if (mkdir_p(s->tapes_dir) != 0) {
+        session_set_error(s, "cannot create tape dir %s", s->tapes_dir);
+        return -1;
+    }
     snprintf(s->mesen_dir, sizeof s->mesen_dir, "%s/mesen", s->data_dir);
     if (mkdir_p(s->mesen_dir) != 0) {
         session_set_error(s, "cannot create Mesen dir %s", s->mesen_dir);

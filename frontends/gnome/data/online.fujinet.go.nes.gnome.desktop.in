@@ -7,6 +7,6 @@ Exec=fujinet-go-nes-gnome %f
 Icon=online.fujinet.go.nes.gnome
 Terminal=false
 Categories=Game;Emulator;
-Keywords=nes;nintendo;famicom;fujinet;emulator;retro;
+Keywords=nes;nintendo;famicom;fujinet;emulator;retro;family basic;keyboard;
 MimeType=application/x-nes-rom;
 StartupNotify=true

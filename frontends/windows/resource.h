@@ -9,6 +9,10 @@
 #define IDM_IMPORT_SD      1003
 #define IDM_RESET_CONFIG   1004
 #define IDM_RESET_GAME     1005
+#define IDM_KBD_MODE       1006
+#define IDM_TAPE_PLAY      1007
+#define IDM_TAPE_RECORD    1008
+#define IDM_TAPE_STOP      1009
 #define IDM_SETTINGS       1030
 #define IDM_EXIT           1031
 #define IDM_CONTROLLERS    1010
@@ -32,6 +36,7 @@
 #define IDC_SET_FUJINET    2010
 #define IDC_SET_AUDIO      2011
 #define IDC_SET_GAMEPAD    2012
+#define IDC_SET_KEYBOARD   2013
 
 #define IDC_LOG_EDIT       2100
 #define IDC_STATUSBAR      2200

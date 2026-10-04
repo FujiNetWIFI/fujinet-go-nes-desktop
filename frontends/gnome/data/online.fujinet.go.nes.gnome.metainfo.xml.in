@@ -25,6 +25,13 @@
       breakpoints, the PPU, the APU and the cartridge.
     </p>
     <p>
+      The Famicom expansion port takes the Family BASIC Keyboard, with its
+      Data Recorder for saving and loading programs on tape files, or the
+      Subor keyboard. Type on the computer's keyboard (Scroll Lock switches
+      between the keyboard and the controllers) or click the on-screen
+      keyboard.
+    </p>
+    <p>
       Nothing copyrighted is included: the NES has no system ROM, and the
       only built-in program is FujiNet's own CONFIG client.
     </p>

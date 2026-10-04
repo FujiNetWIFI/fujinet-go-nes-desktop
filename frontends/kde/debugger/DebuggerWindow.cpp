@@ -562,6 +562,13 @@ void DebuggerWindow::refreshApu()
             if (a.pad[port] & (1u << b)) s += QLatin1Char(' ') + QString::fromUtf8(names[b]);
         s += QLatin1Char('\n');
     }
+    static const char *const tapes[3] = { "idle", "playing", "recording" };
+    const char *kbd = nes_keyboard_name(a.keyboard);
+    s += QStringLiteral("\nExpansion  %1\n").arg(QString::fromUtf8(kbd ? kbd : "?"));
+    if (a.keyboard != NES_KBD_NONE)
+        s += QStringLiteral("Keys held  %1\n").arg(a.keys_held[0] ? QString::fromUtf8(a.keys_held) : QStringLiteral("none"));
+    if (a.keyboard == NES_KBD_FAMILY_BASIC)
+        s += QStringLiteral("Tape       %1\n").arg(QString::fromUtf8(a.tape >= 0 && a.tape < 3 ? tapes[a.tape] : "?"));
     m_apu->setPlainText(s);
 }
 

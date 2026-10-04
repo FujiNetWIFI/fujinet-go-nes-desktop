@@ -57,9 +57,24 @@ M3  frontends                                                         [~]
       NSStepper, the Controllers panel's hand-computed frames)
   [ ] screenshots for the metainfo files
 
+M3b keyboards on the expansion port                                  [x]
+  [x] core: Family BASIC / Subor via NesConfig.ExpPort and CustomKeys
+      (virtual keys 64..), live switch, persisted; keyboard mode with
+      Scroll Lock handled in nessession_key so every frontend agrees;
+      on-screen layouts in key units; Data Recorder play/record/stop
+  [x] nesdebug APU & Input: keyboard, tape state, held keys
+  [x] ctest keyboard: matrix-scan ROM for both keyboards, Scroll Lock,
+      two host keys on one NES key, on-screen press, tape round trip
+  [x] fujinet-lib-experimental add-nes: fuji_nes_kbd_detect/scan/getc
+  [x] fujinet-config add-nes (4ede16d): keyboard navigation and typed
+      input in the editor; re-embedded in MesenCE
+  [x] all four frontends: Expansion port setting, Keyboard Mode, Data
+      Recorder menu, KBD/PLAY/REC status, on-screen keyboard, debugger
+  [ ] macOS: ⌘K is Keyboard Mode now, Controllers moved to ⌘J
+
 M4  packaging                                                         [ ]
   [x] MesenCE add-fujinet-support pushed; MESEN_COMMIT pinned to
-      ad1425a09 (Dependencies.cmake and both flatpak manifests)
+      3e463e3a4 (Dependencies.cmake and both flatpak manifests)
   [x] patch 0002 (.nes ROM images) upstreamed: fujinet-firmware da3973c10
       on nes-bringup; drop the patch once the pin includes it
   [ ] flatpak builds, release dry run on a test tag

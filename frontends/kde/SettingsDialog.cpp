@@ -85,6 +85,15 @@ bool SettingsDialog::run(QWidget *parent, nessession *session)
     QCheckBox *aj = check("Analog sticks drive the D-pad", "The left stick as the controller's cross, as well as the D-pad", session, "analog_joystick", 1);
     QObject::connect(aj, &QCheckBox::toggled, &dlg, [=](bool on) { nessession_set_analog(session, on ? 1 : 0); });
     pform->addRow(aj);
+    /* The Famicom expansion port: a keyboard (live, like the controllers) */
+    auto *kbd = new QComboBox;
+    for (int i = 0; nes_keyboard_name(i); ++i) kbd->addItem(QString::fromUtf8(nes_keyboard_name(i)));
+    kbd->setCurrentIndex(nessession_keyboard(session));
+    kbd->setToolTip(QStringLiteral("A keyboard on the expansion port. While it is attached, typing goes to it; "
+                                   "Scroll Lock gives the keys back to the controllers."));
+    QObject::connect(kbd, &QComboBox::currentIndexChanged, &dlg,
+                     [=](int idx) { nessession_set_keyboard(session, idx); });
+    pform->addRow(QStringLiteral("Expansion port"), kbd);
     outer->addWidget(ports);
 
     /* Gamepads: one row per pad, refreshed as they come and go */

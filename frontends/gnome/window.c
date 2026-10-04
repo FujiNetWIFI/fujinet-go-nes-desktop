@@ -9,6 +9,11 @@
  * same path the Qt, Win32 and AppKit frontends take, which is what lets one
  * tested table serve all four.
  *
+ * With an expansion-port keyboard in keyboard mode every key is the
+ * keyboard's (Escape, Backspace, the F-keys...): only the Ctrl menu
+ * accelerators stay the window's. Scroll Lock, which the session handles,
+ * switches the mode.
+ *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -36,6 +41,9 @@ struct _NESWindow {
     gboolean sysact_down[NES_SYSACT_COUNT];
     unsigned pad_generation;
     gboolean fullscreen;
+    int kbd_shown;              /* what the menu and status last showed: */
+    int captures_shown;         /* -1 forces a refresh */
+    int tape_shown;
 };
 
 G_DEFINE_FINAL_TYPE(NESWindow, nes_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -95,6 +103,48 @@ static void run_sysaction(NESWindow *self, int sa)
     }
 }
 
+/* The Ctrl shortcuts that stay the window's while the keyboard captures
+ * (both NES keyboards have a CTR key, so Ctrl+letter otherwise types). */
+static gboolean is_accelerator(guint keyval, GdkModifierType state)
+{
+    guint k = gdk_keyval_to_lower(keyval);
+    if (!(state & GDK_CONTROL_MASK)) return FALSE;
+    return k == GDK_KEY_o || k == GDK_KEY_r || k == GDK_KEY_comma;
+}
+
+static gboolean update_status(gpointer user_data);
+
+/* The keyboard menu items and the KBD / tape indicator follow the session:
+ * Scroll Lock switches the mode inside nessession_key, and a tape stops by
+ * itself at its end. */
+static void sync_keyboard(NESWindow *self)
+{
+    int kbd = nessession_keyboard(self->session);
+    int captures = nessession_keyboard_captures(self->session);
+    int tape = nessession_tape_state(self->session);
+    GActionMap *map = G_ACTION_MAP(self);
+    GAction *a;
+    gboolean fb = kbd == NES_KBD_FAMILY_BASIC;
+
+    if (kbd == self->kbd_shown && captures == self->captures_shown && tape == self->tape_shown)
+        return;
+    self->kbd_shown = kbd;
+    self->captures_shown = captures;
+    self->tape_shown = tape;
+    /* a key held into a mode switch must not leave a system action latched */
+    memset(self->sysact_down, 0, sizeof self->sysact_down);
+
+    a = g_action_map_lookup_action(map, "keyboard-mode");
+    g_simple_action_set_enabled(G_SIMPLE_ACTION(a), kbd != NES_KBD_NONE);
+    g_simple_action_set_state(G_SIMPLE_ACTION(a),
+        g_variant_new_boolean(kbd != NES_KBD_NONE && nessession_keyboard_mode(self->session)));
+    g_simple_action_set_enabled(G_SIMPLE_ACTION(g_action_map_lookup_action(map, "tape-play")), fb);
+    g_simple_action_set_enabled(G_SIMPLE_ACTION(g_action_map_lookup_action(map, "tape-record")), fb);
+    g_simple_action_set_enabled(G_SIMPLE_ACTION(g_action_map_lookup_action(map, "tape-stop")),
+                                fb && tape != NES_TAPE_IDLE);
+    update_status(self);
+}
+
 static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer user_data)
@@ -103,6 +153,14 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     guint32 keysym;
     int sa;
     (void)ctrl;
+
+    if (nessession_keyboard_captures(self->session)) {
+        if (is_accelerator(keyval, state))
+            return FALSE;
+        nessession_key(self->session, keysym_of(keyval, keycode), 1);
+        sync_keyboard(self);    /* Scroll Lock may have just switched modes */
+        return TRUE;
+    }
 
     /* The window's own keys, deliberately not bindable: they are how you
      * reach the panels that do the binding. */
@@ -133,7 +191,11 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         }
         return TRUE;
     }
-    return nessession_key(self->session, keysym, 1) ? TRUE : FALSE;
+    if (nessession_key(self->session, keysym, 1)) {
+        sync_keyboard(self);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static gboolean on_key_released(GtkEventControllerKey *ctrl, guint keyval,
@@ -143,8 +205,14 @@ static gboolean on_key_released(GtkEventControllerKey *ctrl, guint keyval,
     NESWindow *self = user_data;
     guint32 keysym;
     int sa;
-    (void)ctrl; (void)state;
+    (void)ctrl;
 
+    if (nessession_keyboard_captures(self->session)) {
+        if (is_accelerator(keyval, state))
+            return FALSE;
+        nessession_key(self->session, keysym_of(keyval, keycode), 0);
+        return TRUE;
+    }
     if (keyval == GDK_KEY_F9 || keyval == GDK_KEY_F11 || keyval == GDK_KEY_F12)
         return TRUE;
     keysym = keysym_of(keyval, keycode);
@@ -184,6 +252,7 @@ static gboolean sysact_drain_tick(gpointer user_data)
         if (nessession_gamepad_last_event(self->session, text, sizeof text) > 0)
             nes_window_toast(self, text);
     }
+    sync_keyboard(self);
     return G_SOURCE_CONTINUE;
 }
 
@@ -194,6 +263,7 @@ static gboolean update_status(gpointer user_data)
     NESWindow *self = user_data;
     char text[200], st[160];
     gboolean on = FALSE;
+    int tape = nessession_tape_state(self->session);
 
     if (!nessession_is_running(self->session)) {
         g_snprintf(text, sizeof text, "Stopped");
@@ -208,6 +278,13 @@ static gboolean update_status(gpointer user_data)
                        slash ? slash + 1 : cart, st);
         else
             g_snprintf(text, sizeof text, "FujiNet %s", st);
+        /* typing goes to the expansion-port keyboard; the deck is running */
+        if (nessession_keyboard_captures(self->session))
+            g_strlcat(text, " \xc2\xb7 KBD", sizeof text);
+        if (tape == NES_TAPE_PLAYING)
+            g_strlcat(text, " \xc2\xb7 PLAY", sizeof text);
+        else if (tape == NES_TAPE_RECORDING)
+            g_strlcat(text, " \xc2\xb7 REC", sizeof text);
     }
     gtk_label_set_text(GTK_LABEL(self->status), text);
     if (on) {
@@ -371,6 +448,100 @@ static void action_reset_config(GSimpleAction *a, GVariant *p, gpointer user_dat
     run_sysaction(user_data, NES_SYSACT_RESET_CONFIG);
 }
 
+/* ---- the expansion port: keyboard mode and the Data Recorder ------------- */
+
+static void action_keyboard_mode(GSimpleAction *a, GVariant *p, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    (void)a; (void)p;
+    if (nessession_keyboard(self->session) == NES_KBD_NONE) return;
+    nessession_set_keyboard_mode(self->session, !nessession_keyboard_mode(self->session));
+    sync_keyboard(self);
+}
+
+static GtkFileDialog *tape_dialog(NESWindow *self, const char *title)
+{
+    GtkFileDialog *dlg = gtk_file_dialog_new();
+    GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    GtkFileFilter *tapes = gtk_file_filter_new();
+    GtkFileFilter *all = gtk_file_filter_new();
+    const char *dir = nessession_tapes_path(self->session);
+
+    gtk_file_filter_set_name(tapes, "Family BASIC tapes (*.fbt)");
+    gtk_file_filter_add_pattern(tapes, "*.fbt");
+    gtk_file_filter_set_name(all, "All files");
+    gtk_file_filter_add_pattern(all, "*");
+    g_list_store_append(filters, tapes);
+    g_list_store_append(filters, all);
+    gtk_file_dialog_set_title(dlg, title);
+    gtk_file_dialog_set_filters(dlg, G_LIST_MODEL(filters));
+    if (dir && *dir) {
+        g_autoptr(GFile) folder = g_file_new_for_path(dir);
+        gtk_file_dialog_set_initial_folder(dlg, folder);
+    }
+    g_object_unref(tapes);
+    g_object_unref(all);
+    g_object_unref(filters);
+    return dlg;
+}
+
+static void tape_result(NESWindow *self, int rc, const char *heading, const char *done)
+{
+    if (rc != 0) {
+        show_error(self, heading, nessession_last_error(self->session));
+        return;
+    }
+    nes_window_toast(self, done);
+    sync_keyboard(self);
+}
+
+static void on_tape_play_chosen(GObject *src, GAsyncResult *res, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    g_autoptr(GFile) file = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, NULL);
+    g_autofree char *path = NULL;
+    if (!file || !(path = g_file_get_path(file))) return;
+    tape_result(self, nessession_tape_play(self->session, path),
+                "Cannot Play Tape", "Data Recorder: playing");
+}
+
+static void on_tape_record_chosen(GObject *src, GAsyncResult *res, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    g_autoptr(GFile) file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(src), res, NULL);
+    g_autofree char *path = NULL;
+    if (!file || !(path = g_file_get_path(file))) return;
+    tape_result(self, nessession_tape_record(self->session, path),
+                "Cannot Record Tape", "Data Recorder: recording \xe2\x80\x94 Stop saves the tape");
+}
+
+static void action_tape_play(GSimpleAction *a, GVariant *p, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    GtkFileDialog *dlg = tape_dialog(self, "Play Tape");
+    (void)a; (void)p;
+    gtk_file_dialog_open(dlg, GTK_WINDOW(self), NULL, on_tape_play_chosen, self);
+    g_object_unref(dlg);
+}
+
+static void action_tape_record(GSimpleAction *a, GVariant *p, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    GtkFileDialog *dlg = tape_dialog(self, "Record Tape");
+    (void)a; (void)p;
+    gtk_file_dialog_set_initial_name(dlg, "untitled.fbt");
+    gtk_file_dialog_save(dlg, GTK_WINDOW(self), NULL, on_tape_record_chosen, self);
+    g_object_unref(dlg);
+}
+
+static void action_tape_stop(GSimpleAction *a, GVariant *p, gpointer user_data)
+{
+    NESWindow *self = user_data;
+    (void)a; (void)p;
+    tape_result(self, nessession_tape_stop(self->session),
+                "Cannot Stop the Tape", "Data Recorder: stopped");
+}
+
 static void action_controllers(GSimpleAction *a, GVariant *p, gpointer user_data)
 {
     NESWindow *self = user_data;
@@ -490,6 +661,10 @@ static const GActionEntry win_actions[] = {
     { "import-sd", action_import_sd, NULL, NULL, NULL, { 0 } },
     { "reset-game", action_reset_game, NULL, NULL, NULL, { 0 } },
     { "reset-config", action_reset_config, NULL, NULL, NULL, { 0 } },
+    { "keyboard-mode", action_keyboard_mode, NULL, "false", NULL, { 0 } },
+    { "tape-play", action_tape_play, NULL, NULL, NULL, { 0 } },
+    { "tape-record", action_tape_record, NULL, NULL, NULL, { 0 } },
+    { "tape-stop", action_tape_stop, NULL, NULL, NULL, { 0 } },
     { "controllers", action_controllers, NULL, NULL, NULL, { 0 } },
     { "debugger", action_debugger, NULL, NULL, NULL, { 0 } },
     { "fullscreen", action_fullscreen, NULL, NULL, NULL, { 0 } },
@@ -511,6 +686,7 @@ static GMenu *build_menu(void)
     GMenu *view = g_menu_new();
     GMenu *fuji = g_menu_new();
     GMenu *app = g_menu_new();
+    GMenu *tape = g_menu_new();
 
     g_menu_append(cart, "_Open Cartridge...", "win.open");
     g_menu_append(cart, "_Eject Cartridge", "win.eject");
@@ -519,6 +695,11 @@ static GMenu *build_menu(void)
 
     g_menu_append(sw, "_Reset Game (Backspace)", "win.reset-game");
     g_menu_append(sw, "Reset to _CONFIG (Esc)", "win.reset-config");
+    g_menu_append(sw, "_Keyboard Mode (Scroll Lock)", "win.keyboard-mode");
+    g_menu_append(tape, "_Play Tape...", "win.tape-play");
+    g_menu_append(tape, "_Record Tape...", "win.tape-record");
+    g_menu_append(tape, "_Stop", "win.tape-stop");
+    g_menu_append_submenu(sw, "_Data Recorder", G_MENU_MODEL(tape));
     g_menu_append_section(menu, "Console", G_MENU_MODEL(sw));
 
     g_menu_append(view, "_Controllers (F9)", "win.controllers");
@@ -541,6 +722,7 @@ static GMenu *build_menu(void)
     g_object_unref(view);
     g_object_unref(fuji);
     g_object_unref(app);
+    g_object_unref(tape);
     return menu;
 }
 
@@ -660,15 +842,21 @@ GtkWidget *nes_window_new(AdwApplication *app, nessession *session)
      * already plugged in at launch. */
     self->pad_generation = nessession_gamepad_generation(session);
     self->sysact_id = g_timeout_add(250, sysact_drain_tick, self);
+    self->kbd_shown = self->captures_shown = self->tape_shown = -1;
+    sync_keyboard(self);
     update_status(self);
 
-    /* NES_OPEN_CONTROLLERS=1 / NES_OPEN_DEBUGGER=1 / NES_OPEN_SETTINGS=1
+    /* NES_OPEN_CONTROLLERS=1 / NES_OPEN_KEYBOARD=1 (the Controllers window
+     * on its keyboard) / NES_OPEN_DEBUGGER=1 / NES_OPEN_SETTINGS=1
      * open those windows at launch, following the family's convention: the
      * way in when the app misbehaves before the menu is reachable. */
     {
         const char *env = g_getenv("NES_OPEN_CONTROLLERS");
         if (env && *env && *env != '0')
             nes_controllers_window_toggle(GTK_WINDOW(self), session);
+        env = g_getenv("NES_OPEN_KEYBOARD");
+        if (env && *env && *env != '0')
+            nes_controllers_window_show_keyboard(GTK_WINDOW(self), session);
         env = g_getenv("NES_OPEN_DEBUGGER");
         if (env && *env && *env != '0')
             nes_debugger_show(GTK_WINDOW(self), session);

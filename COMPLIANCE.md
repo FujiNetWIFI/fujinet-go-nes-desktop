@@ -43,6 +43,9 @@ at staging time:
   again swallowed a `Stop()` that arrived before the thread ran, and `Stop()`
   then joined a thread that never ended. MesenCE's UI never stops a console
   that fast; this app's tests do.
+- **`ITapeRecorder::IsPlaying()`** — a default `false` beside
+  `IsRecording()`, overridden by `FamilyBasicDataRecorder`, so a host can
+  show the Data Recorder's state.
 - **MinGW portability** (Windows) — see `build-aux/windows/mesen-mingw.patch`
   and the fork's history: MesenCE is built with MSVC upstream; the fixes let
   MSYS2 UCRT64 and mingw-w64 build it, guarded so MSVC, Linux and macOS

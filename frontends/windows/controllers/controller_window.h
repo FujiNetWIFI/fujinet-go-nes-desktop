@@ -1,6 +1,7 @@
 /*
  * The Win32 Controllers window: both NES controllers on screen, the
- * console's buttons and the Map row, in a fixed-size tool window.
+ * console's buttons, the Map row and the expansion-port keyboard, in a
+ * fixed-size tool window.
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -14,6 +15,10 @@
 
 /* Show / hide (F9). Created on first use, hidden not destroyed after. */
 void nes_controller_window_toggle(HWND parent, nessession *session);
+
+/* Show the window (NES_OPEN_KEYBOARD): its Keyboard section holds the
+ * on-screen keyboard for the expansion port. */
+void nes_controller_window_show_keyboard(HWND parent, nessession *session);
 
 /* Called when the gamepad set changed, so the per-port pad lines refresh. */
 void nes_controller_window_gamepads_changed(void);

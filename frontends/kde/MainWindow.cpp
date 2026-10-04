@@ -19,6 +19,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QSignalBlocker>
 #include <QStatusBar>
 #include <QUrl>
 
@@ -47,6 +48,9 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
     m_status = new QLabel(QStringLiteral("Starting..."));
     statusBar()->addWidget(m_dot);
     statusBar()->addWidget(m_status);
+    m_kbd = new QLabel;
+    statusBar()->addPermanentWidget(m_kbd);
+    m_display->installEventFilter(this);
 
     buildMenus();
     applyPicture();
@@ -58,6 +62,10 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
      * this timer takes them. */
     connect(&m_sysactTimer, &QTimer::timeout, this, &MainWindow::drainSysactions);
     m_sysactTimer.start(100);
+    /* keyboard mode flips inside nessession_key (Scroll Lock) or from a
+     * settings change; follow it on the same beat */
+    connect(&m_sysactTimer, &QTimer::timeout, this, &MainWindow::syncKeyboard);
+    syncKeyboard();
     /* Gamepads come and go on their own thread; say so when they do. */
     m_padGen = nessession_gamepad_generation(session);
     connect(&m_padTimer, &QTimer::timeout, this, &MainWindow::pollGamepads);
@@ -67,6 +75,10 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
         toggleControllers();
     if (qEnvironmentVariableIsSet("NES_OPEN_DEBUGGER"))
         DebuggerWindow::toggleFor(this, session);
+    if (qEnvironmentVariableIsSet("NES_OPEN_KEYBOARD")) {
+        if (!m_controllers) m_controllers = new ControllersWindow(m_session, this);
+        m_controllers->showKeyboard();
+    }
     if (qEnvironmentVariableIsSet("NES_OPEN_SETTINGS"))
         QTimer::singleShot(0, this, &MainWindow::showSettings);
 }
@@ -105,14 +117,29 @@ void MainWindow::buildMenus()
     machine->addAction(QStringLiteral("Reset to &CONFIG"), QKeySequence(Qt::CTRL | Qt::Key_R), this,
                        [this] { runSysaction(NES_SYSACT_RESET_CONFIG); });
     machine->addSeparator();
+    /* Scroll Lock is handled by the core inside nessession_key; shown as
+     * the hint only */
+    m_kbdModeAction = machine->addAction(QStringLiteral("&Keyboard Mode\tScroll Lock"));
+    m_kbdModeAction->setCheckable(true);
+    m_kbdModeAction->setToolTip(QStringLiteral("Typed keys go to the expansion-port keyboard"));
+    connect(m_kbdModeAction, &QAction::triggered, this, [this](bool on) {
+        nessession_set_keyboard_mode(m_session, on ? 1 : 0);
+        syncKeyboard();
+    });
+    m_tapeMenu = machine->addMenu(QStringLiteral("&Data Recorder"));
+    m_tapeMenu->addAction(QStringLiteral("&Play Tape..."), this, [this] { tapeAction(NES_TAPE_PLAYING); });
+    m_tapeMenu->addAction(QStringLiteral("&Record Tape..."), this, [this] { tapeAction(NES_TAPE_RECORDING); });
+    m_tapeStopAction = m_tapeMenu->addAction(QStringLiteral("&Stop"), this, [this] { tapeAction(NES_TAPE_IDLE); });
+    machine->addSeparator();
     machine->addAction(QStringLiteral("&Preferences..."), QKeySequence(Qt::CTRL | Qt::Key_Comma), this,
                        &MainWindow::showSettings);
     machine->addSeparator();
     machine->addAction(QStringLiteral("&Quit"), QKeySequence::Quit, this, [this] { close(); });
 
     QMenu *view = menuBar()->addMenu(QStringLiteral("&View"));
-    view->addAction(QStringLiteral("&Controllers"), QKeySequence(Qt::Key_F9), this, &MainWindow::toggleControllers);
-    view->addAction(QStringLiteral("&Debugger"), QKeySequence(Qt::Key_F12), this,
+    m_controllersAction = view->addAction(QStringLiteral("&Controllers"), QKeySequence(Qt::Key_F9), this,
+                                          &MainWindow::toggleControllers);
+    m_debuggerAction = view->addAction(QStringLiteral("&Debugger"), QKeySequence(Qt::Key_F12), this,
                     [this] { DebuggerWindow::toggleFor(this, m_session); });
     view->addSeparator();
     m_squareAction = view->addAction(QStringLiteral("S&quare Pixels"));
@@ -127,7 +154,7 @@ void MainWindow::buildMenus()
         nessession_set_int(m_session, "smooth", on ? 1 : 0);
         applyPicture();
     });
-    view->addAction(QStringLiteral("&Fullscreen"), QKeySequence(Qt::Key_F11), this, [this] {
+    m_fullscreenAction = view->addAction(QStringLiteral("&Fullscreen"), QKeySequence(Qt::Key_F11), this, [this] {
         if (isFullScreen()) showNormal(); else showFullScreen();
     });
 
@@ -205,6 +232,62 @@ void MainWindow::toggleControllers()
     else m_controllers->show();
 }
 
+void MainWindow::syncKeyboard()
+{
+    const int kbd = nessession_keyboard(m_session);
+    const bool captured = nessession_keyboard_captures(m_session);
+    {
+        QSignalBlocker block(m_kbdModeAction);
+        m_kbdModeAction->setEnabled(kbd != NES_KBD_NONE);
+        m_kbdModeAction->setChecked(kbd != NES_KBD_NONE && nessession_keyboard_mode(m_session));
+    }
+    const int tape = nessession_tape_state(m_session);
+    m_tapeMenu->setEnabled(kbd == NES_KBD_FAMILY_BASIC);
+    m_tapeStopAction->setEnabled(tape != NES_TAPE_IDLE);
+    QStringList parts;
+    if (captured) parts << QStringLiteral("KBD");
+    if (tape == NES_TAPE_PLAYING) parts << QStringLiteral("PLAY");
+    else if (tape == NES_TAPE_RECORDING) parts << QStringLiteral("REC");
+    m_kbd->setText(parts.join(QStringLiteral("  ")));
+    m_kbd->setToolTip(captured ? QStringLiteral("Keyboard mode: typed keys go to the %1 (Scroll Lock to leave)")
+                                     .arg(QString::fromUtf8(nes_keyboard_name(kbd)))
+                               : QString());
+    if (captured == m_captured) return;
+    m_captured = captured;
+    /* while the keyboard owns the keys, F9/F11/F12 are its keys too */
+    m_controllersAction->setShortcut(captured ? QKeySequence() : QKeySequence(Qt::Key_F9));
+    m_debuggerAction->setShortcut(captured ? QKeySequence() : QKeySequence(Qt::Key_F12));
+    m_fullscreenAction->setShortcut(captured ? QKeySequence() : QKeySequence(Qt::Key_F11));
+}
+
+void MainWindow::tapeAction(int action)
+{
+    int rc = 0;
+    if (action == NES_TAPE_IDLE) {
+        rc = nessession_tape_stop(m_session);
+    } else {
+        const QString dir = QString::fromUtf8(nessession_tapes_path(m_session));
+        const QString filter = QStringLiteral("Family BASIC tapes (*.fbt);;All files (*)");
+        const QString f = action == NES_TAPE_PLAYING
+            ? QFileDialog::getOpenFileName(this, QStringLiteral("Play Tape"), dir, filter)
+            : QFileDialog::getSaveFileName(this, QStringLiteral("Record Tape"), dir + QStringLiteral("/untitled.fbt"), filter);
+        if (f.isEmpty()) return;
+        const QByteArray path = f.toLocal8Bit();
+        rc = action == NES_TAPE_PLAYING ? nessession_tape_play(m_session, path.constData())
+                                        : nessession_tape_record(m_session, path.constData());
+        if (rc == 0)
+            statusBar()->showMessage(QStringLiteral("%1 %2").arg(
+                action == NES_TAPE_PLAYING ? QStringLiteral("Playing") : QStringLiteral("Recording"),
+                QFileInfo(f).fileName()), 4000);
+    }
+    if (rc != 0)
+        QMessageBox::warning(this, QStringLiteral("Data Recorder"),
+                             QString::fromUtf8(nessession_last_error(m_session)));
+    else if (action == NES_TAPE_IDLE)
+        statusBar()->showMessage(QStringLiteral("Tape stopped"), 3000);
+    syncKeyboard();
+}
+
 void MainWindow::runSysaction(int sa)
 {
     switch (sa) {
@@ -275,6 +358,15 @@ void MainWindow::loadMedia(const QString &path)
 void MainWindow::keyPressEvent(QKeyEvent *e)
 {
     if (e->isAutoRepeat()) return;
+    if (nessession_keyboard_captures(m_session)) {
+        /* keyboard mode: every key is the emulated keyboard's (Scroll Lock
+         * included -- the core toggles the mode on it). A Ctrl accelerator
+         * that matched a menu item never gets here. */
+        const uint32_t ks = nesKeysymFromQt(e);
+        if (ks) nessession_key(m_session, ks, 1);
+        syncKeyboard();
+        return;
+    }
     if (e->key() == Qt::Key_F9) { toggleControllers(); return; }
     if (e->key() == Qt::Key_F12) { DebuggerWindow::toggleFor(this, m_session); return; }
     if (e->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) { QMainWindow::keyPressEvent(e); return; }
@@ -287,7 +379,27 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
         if (!m_sysactDown[sa]) { m_sysactDown[sa] = true; runSysaction(sa); }
         return;
     }
-    if (!nessession_key(m_session, ks, 1)) QMainWindow::keyPressEvent(e);
+    const int used = nessession_key(m_session, ks, 1);
+    if (ks == NES_KEYSYM_SCROLL_LOCK) syncKeyboard();
+    if (!used) QMainWindow::keyPressEvent(e);
+}
+
+/* Keyboard mode: Tab must not move focus and a plain-key shortcut must not
+ * fire; take those keys as ordinary key presses. Ctrl accelerators stay. */
+bool MainWindow::captureKey(QEvent *e)
+{
+    if (e->type() != QEvent::ShortcutOverride && e->type() != QEvent::KeyPress) return false;
+    auto *k = static_cast<QKeyEvent *>(e);
+    if (!nessession_keyboard_captures(m_session) || (k->modifiers() & Qt::ControlModifier)) return false;
+    if (e->type() == QEvent::ShortcutOverride) { e->accept(); return true; }
+    if (k->key() == Qt::Key_Tab || k->key() == Qt::Key_Backtab) { keyPressEvent(k); return true; }
+    return false;
+}
+
+bool MainWindow::eventFilter(QObject *o, QEvent *e)
+{
+    if (o == m_display && captureKey(e)) return true;
+    return QMainWindow::eventFilter(o, e);
 }
 
 void MainWindow::keyReleaseEvent(QKeyEvent *e)
@@ -302,6 +414,7 @@ void MainWindow::keyReleaseEvent(QKeyEvent *e)
 
 bool MainWindow::event(QEvent *e)
 {
+    if (captureKey(e)) return true;
     if (e->type() == QEvent::WindowDeactivate) {
         nessession_release_all(m_session);
         for (bool &d : m_sysactDown) d = false;

@@ -32,6 +32,7 @@ struct nessession {
     char config_dir[NES_PATH_MAX];
     char data_dir[NES_PATH_MAX];
     char carts_dir[NES_PATH_MAX];
+    char tapes_dir[NES_PATH_MAX];      /* <data>/tapes: Data Recorder files */
     char mesen_dir[NES_PATH_MAX];    /* <data>/mesen/ -- Mesen's home folder */
     char settings_file[NES_PATH_MAX];
 
@@ -69,6 +70,13 @@ struct nessession {
     void *debugger;           /* nesdebug, lazily created */
     int running;
 
+    /* the expansion-port keyboard: whether typing goes to it, how many
+     * presses hold each key (host keys and the on-screen keyboard combine),
+     * and which host keys hold which key, so a release clears its own press */
+    int kbd_mode;
+    uint8_t kbd_count[128];
+    struct { uint32_t keysym; int index; } kbd_held[16];
+
     /* the last gamepad hot-plug event, for a frontend toast */
     pthread_mutex_t pad_event_mtx;
     char pad_event[128];
@@ -105,6 +113,12 @@ int  gamepad_start(struct nessession *s);
 void gamepad_stop(struct nessession *s);
 /* Called by the gamepad thread with the button/axis state it resolved. */
 void session_gamepad_apply(struct nessession *s, int port, int act, int down);
+/* session.cpp: keyboard mode's share of nessession_key. Returns 1 if the
+ * key was the keyboard's (or Scroll Lock), 0 to leave it to the bindings. */
+int  session_keyboard_key(struct nessession *s, uint32_t keysym, int down);
+/* Release every keyboard key the host or the mouse holds. */
+void session_keyboard_release_all(struct nessession *s);
+
 /* Called by the gamepad thread on a connect/disconnect. */
 void session_gamepad_event(struct nessession *s, const char *text);
 

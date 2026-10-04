@@ -33,6 +33,7 @@ uint32_t nesKeysymFromQt(const QKeyEvent *e)
     case Qt::Key_Shift:   return NES_KEYSYM_LSHIFT;
     case Qt::Key_Control: return NES_KEYSYM_LCTRL;
     case Qt::Key_Alt:     return NES_KEYSYM_LALT;
+    case Qt::Key_ScrollLock: return NES_KEYSYM_SCROLL_LOCK;
     case Qt::Key_Asterisk: return '*';
     case Qt::Key_NumberSign: return '#';
     default: break;

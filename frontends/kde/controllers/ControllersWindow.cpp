@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QVBoxLayout>
 
 #include "../FujiNetWindows.h"
@@ -61,6 +62,92 @@ void PadButton::leaveEvent(QEvent *e)
     QPushButton::leaveEvent(e);
 }
 
+/* ---- KeyboardWidget --------------------------------------------------------- */
+
+static constexpr int kKeyUnit = 34;     /* pixels per key unit */
+
+KeyboardWidget::KeyboardWidget(nessession *session, QWidget *parent)
+    : QWidget(parent), m_session(session)
+{
+    setFocusPolicy(Qt::NoFocus);
+}
+
+void KeyboardWidget::setType(int type)
+{
+    if (type == m_type && m_keys) return;
+    releaseMouse();
+    m_type = type;
+    m_count = nessession_keyboard_layout(type, &m_keys);
+    m_cols = m_rows = 0;
+    for (int i = 0; i < m_count; ++i) {
+        m_cols = qMax(m_cols, m_keys[i].x + m_keys[i].w);
+        m_rows = qMax(m_rows, m_keys[i].y + m_keys[i].h);
+    }
+    updateGeometry();
+    setFixedSize(sizeHint());
+    update();
+}
+
+QSize KeyboardWidget::sizeHint() const
+{
+    return QSize(qMax(1, int(m_cols * kKeyUnit) + 2), qMax(1, int(m_rows * kKeyUnit) + 2));
+}
+
+QRectF KeyboardWidget::keyRect(int i) const
+{
+    const nes_kbd_key &k = m_keys[i];
+    return QRectF(1 + k.x * kKeyUnit + 1.5, 1 + k.y * kKeyUnit + 1.5,
+                  k.w * kKeyUnit - 3, k.h * kKeyUnit - 3);
+}
+
+void KeyboardWidget::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    QFont f = font();
+    f.setPointSizeF(f.pointSizeF() * 0.8);
+    p.setFont(f);
+    const QColor accent = nesAccentColor();
+    const QPalette pal = palette();
+    for (int i = 0; i < m_count; ++i) {
+        const QRectF r = keyRect(i);
+        const bool held = m_keys[i].index == m_mouseKey
+                          || nessession_keyboard_held(m_session, m_keys[i].index);
+        p.setPen(pal.color(QPalette::Mid));
+        p.setBrush(held ? accent : pal.color(QPalette::Button));
+        p.drawRoundedRect(r, 4, 4);
+        p.setPen(held ? QColor(Qt::white) : pal.color(QPalette::ButtonText));
+        p.drawText(r, Qt::AlignCenter | Qt::TextWordWrap, QString::fromUtf8(m_keys[i].label));
+    }
+}
+
+void KeyboardWidget::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() != Qt::LeftButton) return;
+    for (int i = 0; i < m_count; ++i) {
+        if (keyRect(i).contains(e->position())) {
+            releaseMouse();
+            m_mouseKey = m_keys[i].index;
+            nessession_keyboard_press(m_session, m_mouseKey, 1);
+            update();
+            return;
+        }
+    }
+}
+
+void KeyboardWidget::mouseReleaseEvent(QMouseEvent *e)
+{
+    if (e->button() == Qt::LeftButton) releaseMouse();
+}
+
+void KeyboardWidget::releaseMouse()
+{
+    if (m_mouseKey < 0) return;
+    nessession_keyboard_press(m_session, m_mouseKey, 0);
+    m_mouseKey = -1;
+    update();
+}
+
 /* ---- ControllersWindow ------------------------------------------------------ */
 
 /* Fixed button sizes, wide enough for a Map-mode label ("Right Shift /
@@ -77,7 +164,14 @@ ControllersWindow::ControllersWindow(nessession *session, QWidget *parent)
     setWindowTitle(QStringLiteral("Controllers"));
     setFocusPolicy(Qt::StrongFocus);
 
-    auto *root = new QVBoxLayout(this);
+    auto *outer = new QVBoxLayout(this);
+    m_tabs = new QTabWidget;
+    m_tabs->setFocusPolicy(Qt::NoFocus);
+    outer->addWidget(m_tabs);
+    auto *page = new QWidget;
+    auto *root = new QVBoxLayout(page);
+    m_tabs->addTab(page, QStringLiteral("Controllers"));
+    m_tabs->addTab(buildKeyboard(), QStringLiteral("Keyboard"));
     auto *ports = new QHBoxLayout;
     ports->addWidget(buildController(0));
     ports->addWidget(buildController(1));
@@ -124,6 +218,44 @@ ControllersWindow::ControllersWindow(nessession *session, QWidget *parent)
     connect(&m_pollTimer, &QTimer::timeout, this, &ControllersWindow::poll);
     rebuildPads();
     setMapState(-2);
+}
+
+QWidget *ControllersWindow::buildKeyboard()
+{
+    auto *page = new QWidget;
+    auto *v = new QVBoxLayout(page);
+    auto *row = new QHBoxLayout;
+    m_kbdType = new QComboBox;
+    m_kbdType->setFocusPolicy(Qt::NoFocus);
+    for (int i = 0; nes_keyboard_name(i); ++i) m_kbdType->addItem(QString::fromUtf8(nes_keyboard_name(i)));
+    m_kbdType->setCurrentIndex(nessession_keyboard(m_session));
+    connect(m_kbdType, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        nessession_set_keyboard(m_session, idx);
+        m_keyboard->setType(idx);
+    });
+    row->addWidget(new QLabel(QStringLiteral("Expansion port:")));
+    row->addWidget(m_kbdType, 1);
+    v->addLayout(row);
+    m_kbdNote = new QLabel;
+    m_kbdNote->setStyleSheet(QStringLiteral("color: gray;"));
+    m_kbdNote->setWordWrap(true);
+    v->addWidget(m_kbdNote);
+    m_keyboard = new KeyboardWidget(m_session);
+    auto *krow = new QHBoxLayout;
+    krow->addStretch();
+    krow->addWidget(m_keyboard);
+    krow->addStretch();
+    v->addLayout(krow);
+    v->addStretch();
+    m_keyboard->setType(nessession_keyboard(m_session));
+    return page;
+}
+
+void ControllersWindow::showKeyboard()
+{
+    m_tabs->setCurrentIndex(1);
+    show();
+    raise();
 }
 
 PadButton *ControllersWindow::control(const QString &face, int target)
@@ -298,6 +430,21 @@ void ControllersWindow::poll()
             m_type[port]->setCurrentIndex(t);
         }
     }
+    /* the keyboard tab follows a change made elsewhere, and its held keys */
+    const int kbd = nessession_keyboard(m_session);
+    if (m_kbdType->currentIndex() != kbd) {
+        QSignalBlocker block(m_kbdType);
+        m_kbdType->setCurrentIndex(kbd);
+    }
+    m_keyboard->setType(kbd);
+    m_keyboard->update();
+    if (kbd == NES_KBD_NONE)
+        m_kbdNote->setText(QStringLiteral("No keyboard on the expansion port. Choose one to type into "
+                                          "Family BASIC, or into any program that reads a keyboard."));
+    else
+        m_kbdNote->setText(nessession_keyboard_captures(m_session)
+            ? QStringLiteral("Keyboard mode: what you type goes to the keyboard (Scroll Lock gives the keys back to the controllers). Click keys to press them.")
+            : QStringLiteral("Keyboard mode is off: keys drive the controllers (Scroll Lock turns it on). Click keys to press them."));
     if (m_mapState != -2) return;
     const unsigned held[2] = { nessession_buttons_held(m_session, 0), nessession_buttons_held(m_session, 1) };
     for (PadButton *b : m_controls) {
@@ -338,7 +485,7 @@ void ControllersWindow::keyPressEvent(QKeyEvent *e)
         return;
     }
     if (m_mapState == -1) return;
-    if (e->key() == Qt::Key_F9) { hide(); return; }
+    if (e->key() == Qt::Key_F9 && !nessession_keyboard_captures(m_session)) { hide(); return; }
     if (!ks) { QWidget::keyPressEvent(e); return; }
     const int sa = nessession_key_sysaction(m_session, ks);
     if (sa >= 0) { nessession_sysaction(m_session, sa); return; }

@@ -169,7 +169,9 @@ static void set_text_utf8(HWND h, const char *text, int statusbar)
 
 static void update_status(void)
 {
+    static const char *const tape_state[] = { "", "    Tape: PLAY", "    Tape: REC" };
     char title[512], st[160], line[400];
+    int ts;
     const char *cart = nessession_cart_path(g_session);
 
     if (!nessession_is_running(g_session)) {
@@ -194,6 +196,12 @@ static void update_status(void)
         snprintf(line, sizeof line, "FujiNet: %s%s", st,
                  nessession_fujinet_running(g_session) ? "" : " (runtime not running)");
     }
+    /* The expansion port: KBD while typing goes to the emulated keyboard,
+     * and what the Data Recorder is doing. */
+    ts = nessession_tape_state(g_session);
+    snprintf(line + strlen(line), sizeof line - strlen(line), "%s%s",
+             nessession_keyboard_captures(g_session) ? "    KBD" : "",
+             ts > 0 && ts < 3 ? tape_state[ts] : "");
     set_text_utf8(g_statusbar, line, 1);
 }
 
@@ -213,10 +221,15 @@ static void poll_gamepads(void)
 
 /* ---- menu ----------------------------------------------------------------- */
 
+/* The keyboard / Data Recorder state the menu, the status bar and the
+ * settings window last showed; -1 forces the next sync. */
+static int g_kbd_ui_shown = -1;
+
 static void build_menu(HWND hwnd)
 {
     HMENU bar = CreateMenu();
     HMENU machine = CreatePopupMenu();
+    HMENU tape = CreatePopupMenu();
     HMENU view = CreatePopupMenu();
     HMENU fuji = CreatePopupMenu();
     HMENU help = CreatePopupMenu();
@@ -227,6 +240,12 @@ static void build_menu(HWND hwnd)
     AppendMenuA(machine, MF_SEPARATOR, 0, NULL);
     AppendMenuA(machine, MF_STRING, IDM_RESET_GAME, "&Reset Game\tBackspace");
     AppendMenuA(machine, MF_STRING, IDM_RESET_CONFIG, "Reset to &CONFIG\tCtrl+R");
+    AppendMenuA(machine, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(machine, MF_STRING, IDM_KBD_MODE, "&Keyboard Mode\tScroll Lock");
+    AppendMenuA(tape, MF_STRING, IDM_TAPE_PLAY, "&Play Tape...");
+    AppendMenuA(tape, MF_STRING, IDM_TAPE_RECORD, "&Record Tape...");
+    AppendMenuA(tape, MF_STRING, IDM_TAPE_STOP, "&Stop");
+    AppendMenuA(machine, MF_POPUP, (UINT_PTR)tape, "&Data Recorder");
     AppendMenuA(machine, MF_SEPARATOR, 0, NULL);
     AppendMenuA(machine, MF_STRING, IDM_SETTINGS, "&Settings...");
     AppendMenuA(machine, MF_SEPARATOR, 0, NULL);
@@ -249,6 +268,7 @@ static void build_menu(HWND hwnd)
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)fuji, "&FujiNet");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
     SetMenu(hwnd, bar);
+    g_kbd_ui_shown = -1;
 }
 
 static void open_cart(const char *path)
@@ -287,6 +307,29 @@ static int pick_cart(const char *title, char *path, DWORD pathsz)
     return GetOpenFileNameA(&ofn) ? 1 : 0;
 }
 
+/* The Data Recorder's pickers, starting in the session's tapes folder. */
+static int pick_tape(int record, char *path, DWORD pathsz)
+{
+    OPENFILENAMEA ofn;
+    memset(&ofn, 0, sizeof ofn);
+    path[0] = '\0';
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFilter = "Family BASIC tapes (*.fbt)\0*.fbt\0All files\0*.*\0\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = pathsz;
+    ofn.lpstrInitialDir = nessession_tapes_path(g_session);
+    ofn.lpstrDefExt = "fbt";
+    if (record) {
+        ofn.lpstrTitle = "Record Tape";
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+        return GetSaveFileNameA(&ofn) ? 1 : 0;
+    }
+    ofn.lpstrTitle = "Play Tape";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    return GetOpenFileNameA(&ofn) ? 1 : 0;
+}
+
 /* ---- settings window -------------------------------------------------------
  *
  * Same keys and defaults as the other frontends' Preferences, so a machine
@@ -297,7 +340,7 @@ static int pick_cart(const char *title, char *path, DWORD pathsz)
 
 static HWND g_settings_window;
 static int g_settings_dirty;
-static HWND g_pad_list, g_pad_port, g_port_combo[2];
+static HWND g_pad_list, g_pad_port, g_port_combo[2], g_kbd_combo;
 
 static const char *aspect_name(int i)
 {
@@ -365,6 +408,13 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 nessession_set_port_type(g_session, port, sel);
             }
             return 0;
+        case IDC_SET_KEYBOARD:
+            /* Live, like the controller types: the keyboard is plugged in
+             * between frames. */
+            if (HIWORD(wp) == CBN_SELCHANGE)
+                nessession_set_keyboard(g_session,
+                    (int)SendMessageA(GetDlgItem(hwnd, IDC_SET_KEYBOARD), CB_GETCURSEL, 0, 0));
+            return 0;
         case IDC_SET_AN_JOY:
             nessession_set_analog(g_session,
                 SendMessageA(GetDlgItem(hwnd, IDC_SET_AN_JOY), BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -411,6 +461,7 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_settings_window = NULL;
         g_pad_list = g_pad_port = NULL;
         g_port_combo[0] = g_port_combo[1] = NULL;
+        g_kbd_combo = NULL;
         if (g_settings_dirty) {
             g_settings_dirty = 0;
             restart_session();
@@ -472,7 +523,7 @@ static void show_settings(HINSTANCE inst)
     }
     g_settings_window = CreateWindowA("NESSettingsWindow", "Settings",
         WS_OVERLAPPEDWINDOW & ~(WS_MAXIMIZEBOX | WS_THICKFRAME),
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 600, NULL, NULL, inst, NULL);
+        CW_USEDEFAULT, CW_USEDEFAULT, 460, 630, NULL, NULL, inst, NULL);
 
     settings_label(g_settings_window, inst, "Machine", 16, y, 420, 18); y += 22;
     settings_label(g_settings_window, inst, "Region:", 16, y + 3, 90, 18);
@@ -492,6 +543,10 @@ static void show_settings(HINSTANCE inst)
     settings_label(g_settings_window, inst, "Player 2:", 16, y + 3, 90, 18);
     g_port_combo[1] = settings_combo(g_settings_window, inst, IDC_SET_PORT1, 110, y, 200, nes_ctrl_type_name,
                                      nessession_port_type(g_session, 1));
+    y += 28;
+    settings_label(g_settings_window, inst, "Expansion port:", 16, y + 3, 90, 18);
+    g_kbd_combo = settings_combo(g_settings_window, inst, IDC_SET_KEYBOARD, 110, y, 200, nes_keyboard_name,
+                                 nessession_keyboard(g_session));
     y += 32;
     settings_checkbox(g_settings_window, inst, "The left stick drives the D-pad too", IDC_SET_AN_JOY, 16, y, 300,
                       nessession_get_int(g_session, "analog_joystick", 1));
@@ -530,6 +585,40 @@ static void show_settings(HINSTANCE inst)
 
     SetTimer(g_settings_window, IDT_SETTINGS_PADS, 500, NULL);
     ShowWindow(g_settings_window, SW_SHOW);
+}
+
+/* Keep the Keyboard Mode check, the Data Recorder items, the expansion-port
+ * combo and the status bar's KBD / tape fields in step with the session:
+ * Scroll Lock flips the mode inside the core, the Controllers window can
+ * plug a keyboard in, and a tape stops by itself. Cheap enough for the
+ * 100 ms timer; only touches the UI when something changed. */
+static void sync_keyboard_ui(int force)
+{
+    const int kbd = nessession_keyboard(g_session);
+    const int mode = nessession_keyboard_mode(g_session);
+    const int cap = nessession_keyboard_captures(g_session);
+    const int tape = nessession_tape_state(g_session);
+    const int now = kbd | (mode << 4) | (cap << 5) | (tape << 6);
+    HMENU m;
+
+    if (!force && now == g_kbd_ui_shown) return;
+    if (cap && !(g_kbd_ui_shown >= 0 && ((g_kbd_ui_shown >> 5) & 1)))
+        memset(g_sysact_down, 0, sizeof g_sysact_down);   /* their key-ups go to the keyboard now */
+    g_kbd_ui_shown = now;
+
+    m = GetMenu(g_hwnd);
+    if (m) {
+        const UINT fb = kbd == NES_KBD_FAMILY_BASIC ? MF_ENABLED : MF_GRAYED;
+        CheckMenuItem(m, IDM_KBD_MODE, MF_BYCOMMAND | (kbd != NES_KBD_NONE && mode ? MF_CHECKED : MF_UNCHECKED));
+        EnableMenuItem(m, IDM_KBD_MODE, MF_BYCOMMAND | (kbd != NES_KBD_NONE ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(m, IDM_TAPE_PLAY, MF_BYCOMMAND | fb);
+        EnableMenuItem(m, IDM_TAPE_RECORD, MF_BYCOMMAND | fb);
+        EnableMenuItem(m, IDM_TAPE_STOP, MF_BYCOMMAND | (kbd == NES_KBD_FAMILY_BASIC && tape != NES_TAPE_IDLE
+                                                         ? MF_ENABLED : MF_GRAYED));
+    }
+    if (g_kbd_combo && (int)SendMessageA(g_kbd_combo, CB_GETCURSEL, 0, 0) != kbd)
+        SendMessageA(g_kbd_combo, CB_SETCURSEL, (WPARAM)kbd, 0);
+    update_status();
 }
 
 /* ---- FujiNet console log --------------------------------------------------- */
@@ -676,11 +765,29 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         uint32_t ks;
         int sa;
+        const int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (nessession_keyboard_captures(g_session)) {
+            /* Keyboard mode: every key is the emulated keyboard's -- Escape,
+             * Backspace, the F-keys, F10 and both Alts (GRPH and KANA) arrive
+             * here, some as WM_SYSKEYDOWN -- except the Ctrl accelerators.
+             * Returning 0 keeps DefWindowProc from turning Alt or F10 into
+             * the menu bar. Scroll Lock goes the same way: nessession_key
+             * toggles the mode. */
+            if (ctrl && wp == 'O') { PostMessage(hwnd, WM_COMMAND, IDM_OPEN, 0); return 0; }
+            if (ctrl && wp == 'R') { PostMessage(hwnd, WM_COMMAND, IDM_RESET_CONFIG, 0); return 0; }
+            if (lp & (1 << 30)) return 0;
+            ks = nes_keysym_from_msg(wp, lp);
+            if (ks) nessession_key(g_session, ks, 1);
+            /* Alt+F4 still closes the window: the one way out that needs
+             * no mouse. */
+            if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;
+            return 0;
+        }
         if (wp == VK_F9) { nes_controller_window_toggle(hwnd, g_session); return 0; }
         if (wp == VK_F12) { nes_debugger_toggle(hwnd, g_session); return 0; }
         if (wp == VK_F11) { toggle_fullscreen(hwnd); return 0; }
         if (msg == WM_SYSKEYDOWN) break;
-        if (GetKeyState(VK_CONTROL) & 0x8000) {
+        if (ctrl) {
             if (wp == 'O') { PostMessage(hwnd, WM_COMMAND, IDM_OPEN, 0); return 0; }
             if (wp == 'R') { PostMessage(hwnd, WM_COMMAND, IDM_RESET_CONFIG, 0); return 0; }
             break;
@@ -693,18 +800,32 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_sysact_down[sa]) { g_sysact_down[sa] = 1; run_sysaction(sa); }
             return 0;
         }
-        if (nessession_key(g_session, ks, 1)) return 0;
+        /* Scroll Lock lands here too: with a keyboard attached it turns
+         * keyboard mode back on. */
+        if (nessession_key(g_session, ks, 1)) { sync_keyboard_ui(0); return 0; }
         break;
     }
     case WM_KEYUP: case WM_SYSKEYUP: {
         uint32_t ks = nes_keysym_from_msg(wp, lp);
         int sa;
+        if (nessession_keyboard_captures(g_session)) {
+            if (ks) nessession_key(g_session, ks, 0);
+            sync_keyboard_ui(0);
+            return 0;   /* an Alt or F10 release must not open the menu bar */
+        }
         if (!ks) break;
         sa = nessession_key_sysaction(g_session, ks);
         if (sa >= 0) { g_sysact_down[sa] = 0; return 0; }
         if (nessession_key(g_session, ks, 0)) return 0;
         break;
     }
+    case WM_SYSCHAR:
+        /* Alt+letter would open a menu by its mnemonic. */
+        if (nessession_keyboard_captures(g_session)) return 0;
+        break;
+    case WM_SYSCOMMAND:
+        if ((wp & 0xFFF0) == SC_KEYMENU && nessession_keyboard_captures(g_session)) return 0;
+        break;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) {
             nessession_release_all(g_session);
@@ -718,6 +839,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int sa;
             while (nessession_sysaction_take(g_session, &sa)) run_sysaction(sa);
             poll_gamepads();
+            sync_keyboard_ui(0);
         }
         return 0;
 
@@ -741,6 +863,25 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_RESET_GAME: nessession_reset_game(g_session); return 0;
+        case IDM_KBD_MODE:
+            nessession_set_keyboard_mode(g_session, !nessession_keyboard_mode(g_session));
+            sync_keyboard_ui(0);
+            return 0;
+        case IDM_TAPE_PLAY: case IDM_TAPE_RECORD: {
+            char path[MAX_PATH];
+            const int rec = LOWORD(wp) == IDM_TAPE_RECORD;
+            if (!pick_tape(rec, path, sizeof path)) return 0;
+            if ((rec ? nessession_tape_record(g_session, path) : nessession_tape_play(g_session, path)) != 0)
+                MessageBoxA(hwnd, nessession_last_error(g_session), rec ? "Could not record" : "Could not play",
+                            MB_ICONWARNING | MB_OK);
+            sync_keyboard_ui(0);
+            return 0;
+        }
+        case IDM_TAPE_STOP:
+            if (nessession_tape_stop(g_session) != 0)
+                MessageBoxA(hwnd, nessession_last_error(g_session), "Data Recorder", MB_ICONWARNING | MB_OK);
+            sync_keyboard_ui(0);
+            return 0;
         case IDM_RESET_CONFIG: run_sysaction(NES_SYSACT_RESET_CONFIG); update_status(); return 0;
         case IDM_CONTROLLERS: nes_controller_window_toggle(hwnd, g_session); return 0;
         case IDM_DEBUGGER: nes_debugger_toggle(hwnd, g_session); return 0;
@@ -881,9 +1022,10 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     g_pad_generation = nessession_gamepad_generation(g_session);
     SetTimer(g_hwnd, IDT_STATUS, 1000, NULL);
     SetTimer(g_hwnd, IDT_SYSACT, 100, NULL);
-    update_status();
+    sync_keyboard_ui(1);   /* also the status line */
 
     if (env_on("NES_OPEN_CONTROLLERS")) nes_controller_window_toggle(g_hwnd, g_session);
+    if (env_on("NES_OPEN_KEYBOARD")) nes_controller_window_show_keyboard(g_hwnd, g_session);
     if (env_on("NES_OPEN_DEBUGGER")) nes_debugger_show(g_hwnd, g_session);
     if (env_on("NES_OPEN_SETTINGS")) show_settings(inst);
 

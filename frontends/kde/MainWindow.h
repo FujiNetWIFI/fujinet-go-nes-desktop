@@ -26,6 +26,7 @@ protected:
     void dropEvent(QDropEvent *e) override;
     void closeEvent(QCloseEvent *e) override;
     bool event(QEvent *e) override;
+    bool eventFilter(QObject *o, QEvent *e) override;
 
 private:
     void buildMenus();
@@ -40,6 +41,9 @@ private:
     void showSettings();
     void restartSession();
     void showAbout();
+    void syncKeyboard();
+    void tapeAction(int action);
+    bool captureKey(QEvent *e);
 
     nessession *m_session;
     DisplayWidget *m_display = nullptr;
@@ -51,6 +55,15 @@ private:
     QTimer m_padTimer;
     QAction *m_squareAction = nullptr;
     QAction *m_smoothAction = nullptr;
+    /* the plain-F-key shortcuts, cleared while keyboard mode owns the keys */
+    QAction *m_controllersAction = nullptr;
+    QAction *m_debuggerAction = nullptr;
+    QAction *m_fullscreenAction = nullptr;
+    QAction *m_kbdModeAction = nullptr;
+    QMenu *m_tapeMenu = nullptr;
+    QAction *m_tapeStopAction = nullptr;
+    QLabel *m_kbd = nullptr;
+    bool m_captured = false;
     unsigned m_padGen = 0;
     bool m_sysactDown[NES_SYSACT_COUNT] = {};
 };

@@ -2,7 +2,9 @@
  * The Win32 Controllers window: both NES controllers side by side -- the
  * cross, Select, Start, B, A and the two turbo buttons -- each with its
  * port's controller type and the gamepad driving it, then the console's
- * RESET and Reset to CONFIG, then the Map row.
+ * RESET and Reset to CONFIG, then the Map row, then the keyboard on the
+ * expansion port (Family BASIC or Subor), drawn from the core's layout and
+ * clickable like the controllers.
  *
  * A button lights in the accent colour whenever the console sees it held,
  * from whatever source (keyboard, gamepad, or a click here), so the window
@@ -47,6 +49,10 @@
 #define IDT_CAPTURE 1
 #define IDT_HELD    2
 
+#define IDC_KBD_TYPE 100
+#define KBD_UNIT_MAX 40      /* pixels per key unit, at most */
+#define KBD_MAX_KEYS 128
+
 typedef struct {
     RECT rc;
     int target;
@@ -66,6 +72,17 @@ static char g_hint[200];
 static HBRUSH g_accent_brush;
 static HFONT g_bold;
 static int g_total_w, g_total_h;
+
+/* The keyboard section: a heading row with the expansion-port combo, then
+ * the keys, scaled from key units to g_kbd_unit pixels inside g_kbd_rc. */
+static RECT g_kbd_head_rc, g_kbd_mode_rc, g_kbd_rc;
+static HWND g_kbd_combo;
+static HFONT g_small;
+static int g_kbd_unit;
+static int g_kbd_type = -1;          /* the type the section last drew */
+static int g_kbd_mouse = -1;         /* key index held by the captured mouse */
+static int g_kbd_mode_shown = -1;
+static unsigned char g_kbd_shown[KBD_MAX_KEYS];
 
 static void add_button(const char *face, int target, int x, int y, int w, int h)
 {
@@ -133,7 +150,129 @@ static void layout(void)
     SetRect(&g_map_rc, MARGIN, y, MARGIN + 70, y + 30);
     SetRect(&g_defaults_rc, MARGIN + 76, y, MARGIN + 76 + 84, y + 30);
     SetRect(&g_hint_rc, MARGIN + 76 + 84 + 10, y, g_total_w - MARGIN, y + 30);
-    g_total_h = y + 30 + MARGIN;
+    y += 30 + MARGIN + 4;
+
+    /* The keyboard: one scale for both types, so the window never resizes
+     * when another keyboard is plugged in. */
+    {
+        float maxw = 1, maxh = 1;
+        int t, i, avail = g_total_w - 2 * MARGIN;
+        for (t = NES_KBD_NONE + 1; t < NES_KBD_COUNT; t++) {
+            const nes_kbd_key *keys = NULL;
+            const int n = nessession_keyboard_layout(t, &keys);
+            for (i = 0; i < n; i++) {
+                if (keys[i].x + keys[i].w > maxw) maxw = keys[i].x + keys[i].w;
+                if (keys[i].y + keys[i].h > maxh) maxh = keys[i].y + keys[i].h;
+            }
+        }
+        g_kbd_unit = (int)((float)avail / maxw);
+        if (g_kbd_unit > KBD_UNIT_MAX) g_kbd_unit = KBD_UNIT_MAX;
+        SetRect(&g_kbd_head_rc, MARGIN, y, MARGIN + 110, y + 24);
+        SetRect(&g_kbd_mode_rc, MARGIN + 110 + 230, y, g_total_w - MARGIN, y + 24);
+        y += 24 + GAP;
+        SetRect(&g_kbd_rc, MARGIN, y, MARGIN + avail, y + (int)(maxh * (float)g_kbd_unit + 0.5f));
+        y = g_kbd_rc.bottom;
+    }
+    g_total_h = y + MARGIN;
+}
+
+/* A key's rectangle in the window, centred horizontally in the section. */
+static void kbd_key_rect(const nes_kbd_key *k, float width, RECT *rc)
+{
+    const int x0 = g_kbd_rc.left + ((g_kbd_rc.right - g_kbd_rc.left) - (int)(width * (float)g_kbd_unit)) / 2;
+    rc->left = x0 + (int)(k->x * (float)g_kbd_unit);
+    rc->top = g_kbd_rc.top + (int)(k->y * (float)g_kbd_unit);
+    rc->right = x0 + (int)((k->x + k->w) * (float)g_kbd_unit) - 2;
+    rc->bottom = g_kbd_rc.top + (int)((k->y + k->h) * (float)g_kbd_unit) - 2;
+}
+
+static float kbd_width(const nes_kbd_key *keys, int n)
+{
+    float w = 0;
+    int i;
+    for (i = 0; i < n; i++)
+        if (keys[i].x + keys[i].w > w) w = keys[i].x + keys[i].w;
+    return w;
+}
+
+/* The key index under a point, or -1. */
+static int kbd_hit(int x, int y)
+{
+    const nes_kbd_key *keys = NULL;
+    const int n = nessession_keyboard_layout(nessession_keyboard(g_session), &keys);
+    const float width = kbd_width(keys, n);
+    POINT p = { x, y };
+    int i;
+    for (i = 0; i < n; i++) {
+        RECT rc;
+        kbd_key_rect(&keys[i], width, &rc);
+        if (PtInRect(&rc, p)) return keys[i].index;
+    }
+    return -1;
+}
+
+static void paint_keyboard(HDC dc, HFONT font)
+{
+    const int type = nessession_keyboard(g_session);
+    const nes_kbd_key *keys = NULL;
+    const int n = nessession_keyboard_layout(type, &keys);
+    const float width = kbd_width(keys, n);
+    char line[160];
+    int i;
+
+    SelectObject(dc, g_bold);
+    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    DrawTextA(dc, "Keyboard", -1, &g_kbd_head_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, font);
+    if (type != NES_KBD_NONE) {
+        snprintf(line, sizeof line, "Keyboard mode %s (Scroll Lock)",
+                 nessession_keyboard_mode(g_session) ? "on: typing goes to the keyboard" : "off: keys drive the controllers");
+        SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        DrawTextA(dc, line, -1, &g_kbd_mode_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    if (n == 0) {
+        RECT r = g_kbd_rc;
+        FillRect(dc, &r, (HBRUSH)GetStockObject(LTGRAY_BRUSH));
+        FrameRect(dc, &r, (HBRUSH)GetStockObject(GRAY_BRUSH));
+        SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        DrawTextA(dc, "No keyboard on the expansion port. Choose the Family BASIC or Subor keyboard above.",
+                  -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        return;
+    }
+
+    SelectObject(dc, g_small);
+    for (i = 0; i < n; i++) {
+        RECT rc, text;
+        const int idx = keys[i].index;
+        const int lit = (idx >= 0 && idx < KBD_MAX_KEYS && g_kbd_shown[idx]) || idx == g_kbd_mouse;
+        int h;
+        kbd_key_rect(&keys[i], width, &rc);
+        if (lit) {
+            FillRect(dc, &rc, g_accent_brush);
+            FrameRect(dc, &rc, (HBRUSH)GetStockObject(GRAY_BRUSH));
+            SetTextColor(dc, RGB(255, 255, 255));
+        } else {
+            DrawFrameControl(dc, &rc, DFC_BUTTON, DFCS_BUTTONPUSH);
+            SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+        }
+        /* Centred both ways; a two-word legend ("CLR HOME") may wrap. */
+        text = rc;
+        InflateRect(&text, -1, 0);
+        h = 0;
+        {
+            wchar_t w[64];
+            if (MultiByteToWideChar(CP_UTF8, 0, keys[i].label ? keys[i].label : "", -1, w, 64) > 0) {
+                h = DrawTextW(dc, w, -1, &text, DT_CENTER | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+                text.left = rc.left + 1;
+                text.right = rc.right - 1;
+                text.top = rc.top + ((rc.bottom - rc.top) - h) / 2;
+                text.bottom = rc.bottom;
+                DrawTextW(dc, w, -1, &text, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+            }
+        }
+    }
+    SelectObject(dc, font);
 }
 
 static void press_target(int target, int down)
@@ -286,6 +425,7 @@ static void paint_panel(HDC dc)
         SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
         DrawTextA(dc, g_hint, -1, &g_hint_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
+    paint_keyboard(dc, font);
     SelectObject(dc, old);
 }
 
@@ -295,6 +435,30 @@ static void refresh_held(void)
     for (port = 0; port < 2; port++) {
         unsigned now = nessession_buttons_held(g_session, port);
         if (now != g_shown_held[port]) { g_shown_held[port] = now; changed = 1; }
+    }
+    /* The keyboard: what is plugged in (the menu or Settings may change it),
+     * keyboard mode (Scroll Lock), and which keys the console sees held. */
+    {
+        const int type = nessession_keyboard(g_session);
+        const int mode = nessession_keyboard_mode(g_session);
+        int i, count = 0;
+        if (type != g_kbd_type) {
+            g_kbd_type = type;
+            if (g_kbd_combo) SendMessageA(g_kbd_combo, CB_SETCURSEL, (WPARAM)type, 0);
+            changed = 1;
+        }
+        if (mode != g_kbd_mode_shown) { g_kbd_mode_shown = mode; changed = 1; }
+        if (type != NES_KBD_NONE) {
+            const nes_kbd_key *keys = NULL;
+            const int n = nessession_keyboard_layout(type, &keys);
+            for (i = 0; i < n; i++)
+                if (keys[i].index + 1 > count) count = keys[i].index + 1;
+        }
+        if (count > KBD_MAX_KEYS) count = KBD_MAX_KEYS;
+        for (i = 0; i < KBD_MAX_KEYS; i++) {
+            const unsigned char now = (unsigned char)(i < count && nessession_keyboard_held(g_session, i));
+            if (now != g_kbd_shown[i]) { g_kbd_shown[i] = now; changed = 1; }
+        }
     }
     if (changed) InvalidateRect(g_panel, NULL, FALSE);
 }
@@ -345,7 +509,17 @@ static LRESULT CALLBACK pad_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
-        if (i < 0) return 0;
+        if (i < 0) {
+            /* The on-screen keyboard: held while the mouse is down. */
+            const int k = g_map_state == -2 && PtInRect(&g_kbd_rc, p) ? kbd_hit(x, y) : -1;
+            if (k >= 0) {
+                g_kbd_mouse = k;
+                SetCapture(hwnd);
+                nessession_keyboard_press(g_session, k, 1);
+                InvalidateRect(hwnd, &g_kbd_rc, FALSE);
+            }
+            return 0;
+        }
 
         if (g_map_state == -1) { set_map_state(g_btn[i].target); return 0; }
         if (g_map_state >= 0) return 0;
@@ -367,7 +541,32 @@ static LRESULT CALLBACK pad_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             press_target(t, 0);
             InvalidateRect(hwnd, &r, FALSE);
         }
+        if (g_kbd_mouse >= 0) {
+            const int k = g_kbd_mouse;
+            g_kbd_mouse = -1;
+            ReleaseCapture();
+            nessession_keyboard_press(g_session, k, 0);
+            InvalidateRect(hwnd, &g_kbd_rc, FALSE);
+        }
         return 0;
+    case WM_CAPTURECHANGED:
+        /* Lost the mouse some other way (Alt+Tab mid-press): let go. */
+        if (g_kbd_mouse >= 0 && (HWND)lp != hwnd) {
+            nessession_keyboard_press(g_session, g_kbd_mouse, 0);
+            g_kbd_mouse = -1;
+            InvalidateRect(hwnd, &g_kbd_rc, FALSE);
+        }
+        break;
+
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_KBD_TYPE && HIWORD(wp) == CBN_SELCHANGE) {
+            nessession_set_keyboard(g_session, (int)SendMessageA(g_kbd_combo, CB_GETCURSEL, 0, 0));
+            SetFocus(hwnd);   /* keys belong to the window again, not the combo */
+            refresh_held();
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
 
     case WM_TIMER:
         if (wp == IDT_CAPTURE && g_map_state >= 0) {
@@ -409,6 +608,13 @@ static LRESULT CALLBACK pad_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == VK_ESCAPE) set_map_state(-2);
             return 0;
         }
+        if (nessession_keyboard_captures(g_session)) {
+            /* Keyboard mode: every key is the emulated keyboard's (F9, the
+             * F-keys, Alt as GRPH/KANA, Scroll Lock to toggle back). */
+            if (ks) nessession_key(g_session, ks, 1);
+            if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;   /* Alt+F4 still closes */
+            return 0;
+        }
         if (wp == VK_F9) { ShowWindow(hwnd, SW_HIDE); return 0; }
         if (!ks) break;
         sa = nessession_key_sysaction(g_session, ks);
@@ -419,9 +625,19 @@ static LRESULT CALLBACK pad_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYUP: case WM_SYSKEYUP: {
         const uint32_t ks = nes_keysym_from_msg(wp, lp);
         if (g_map_state != -2) return 0;
+        if (nessession_keyboard_captures(g_session)) {
+            if (ks) nessession_key(g_session, ks, 0);
+            return 0;   /* an Alt release must not open the system menu */
+        }
         if (ks && nessession_key(g_session, ks, 0)) return 0;
         break;
     }
+    case WM_SYSCHAR:
+        if (nessession_keyboard_captures(g_session)) return 0;
+        break;
+    case WM_SYSCOMMAND:
+        if ((wp & 0xFFF0) == SC_KEYMENU && nessession_keyboard_captures(g_session)) return 0;
+        break;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) nessession_release_all(g_session);
         return 0;
@@ -455,6 +671,9 @@ void nes_controller_window_toggle(HWND parent, nessession *session)
         GetObjectA(GetStockObject(DEFAULT_GUI_FONT), sizeof lf, &lf);
         lf.lfWeight = FW_BOLD;
         g_bold = CreateFontIndirectA(&lf);
+        lf.lfWeight = FW_NORMAL;
+        lf.lfHeight = g_kbd_unit >= 36 ? -11 : -9;
+        g_small = CreateFontIndirectA(&lf);
 
         memset(&wc, 0, sizeof wc);
         wc.cbSize = sizeof wc;
@@ -469,13 +688,25 @@ void nes_controller_window_toggle(HWND parent, nessession *session)
         /* A tool window with a caption and no thick frame or maximize box:
          * it is exactly the size of its controls. WS_EX_TOOLWINDOW also
          * keeps it off the taskbar. */
-        AdjustWindowRectEx(&want, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_TOOLWINDOW);
+        AdjustWindowRectEx(&want, WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, FALSE, WS_EX_TOOLWINDOW);
         g_panel = CreateWindowExA(WS_EX_TOOLWINDOW, PAD_CLASS, "Controllers",
-                                  WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
+                                  WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                                   want.right - want.left, want.bottom - want.top,
                                   parent, NULL, wc.hInstance, NULL);
         if (!g_panel) return;
         g_shown_held[0] = g_shown_held[1] = 0;
+
+        /* The expansion port's own combo, beside the Keyboard heading. */
+        {
+            int t;
+            g_kbd_combo = CreateWindowExA(0, "COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                          g_kbd_head_rc.right, g_kbd_head_rc.top, 220, 200, g_panel,
+                                          (HMENU)(INT_PTR)IDC_KBD_TYPE, wc.hInstance, NULL);
+            for (t = 0; nes_keyboard_name(t); t++)
+                SendMessageA(g_kbd_combo, CB_ADDSTRING, 0, (LPARAM)nes_keyboard_name(t));
+            SendMessageA(g_kbd_combo, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+            g_kbd_type = -1;
+        }
     }
 
     if (IsWindowVisible(g_panel)) {
@@ -485,6 +716,14 @@ void nes_controller_window_toggle(HWND parent, nessession *session)
         ShowWindow(g_panel, SW_SHOW);
         SetForegroundWindow(g_panel);
     }
+}
+
+void nes_controller_window_show_keyboard(HWND parent, nessession *session)
+{
+    /* One window holds the controllers and the keyboard, so "on the
+     * keyboard" is just shown -- with keys going to the panel. */
+    if (!g_panel || !IsWindowVisible(g_panel)) nes_controller_window_toggle(parent, session);
+    if (g_panel) SetFocus(g_panel);
 }
 
 void nes_controller_window_gamepads_changed(void)

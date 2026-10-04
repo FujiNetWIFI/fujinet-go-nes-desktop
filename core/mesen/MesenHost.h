@@ -73,6 +73,7 @@ public:
 		int volume = 100;
 		int region = 0;             // nes_region
 		int portType[2] = { 0, 0 }; // nes_ctrl_type
+		int keyboard = 0;           // nes_keyboard on the expansion port
 	};
 
 	MesenHost();
@@ -110,6 +111,18 @@ public:
 	uint32_t PaletteColor(uint8_t index);
 	void SetPortType(int port, int type);
 	void SetRegion(int region);
+
+	// The expansion-port keyboard (nes_keyboard) and its keys, by MesenCE
+	// key index.
+	void SetKeyboard(int type);
+	void SetKeyboardKey(int index, bool down);
+	bool KeyboardKeyHeld(int index);
+
+	// The Family BASIC Data Recorder: 0 play, 1 record, 2 stop (MesenCE's
+	// TapeRecorderAction). False when no recorder is attached.
+	bool Tape(int action, const std::string& path);
+	// nes_tape_state.
+	int TapeState();
 
 	Emulator* GetEmulator() { return _emu.get(); }
 	std::string GetLog();

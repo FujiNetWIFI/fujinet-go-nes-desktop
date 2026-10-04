@@ -25,6 +25,7 @@
 
 extern "C" {
 #include "session_internal.h"
+#include "keyboard.h"
 #include "nesdebug.h"
 }
 
@@ -171,6 +172,7 @@ extern "C" void nessession_default_opts(nessession* s, nessession_start_opts* op
   opts->port_type[0] = nessession_get_int(s, "port0_type", NES_CTRL_STANDARD);
   opts->port_type[1] = nessession_get_int(s, "port1_type", NES_CTRL_STANDARD);
   opts->analog_joystick = nessession_get_int(s, "analog_joystick", 1);
+  opts->keyboard = nessession_get_int(s, "keyboard", NES_KBD_NONE);
   opts->enable_fujinet = nessession_get_int(s, "enable_fujinet", 1);
   opts->enable_audio = nessession_get_int(s, "enable_audio", 1);
   opts->enable_gamepad = nessession_get_int(s, "enable_gamepad", 1);
@@ -200,6 +202,12 @@ extern "C" int nessession_start(nessession* s, const nessession_start_opts* opts
   for(int p = 0; p < 2; p++)
     if(s->opts.port_type[p] < 0 || s->opts.port_type[p] >= NES_CTRL_COUNT)
       s->opts.port_type[p] = NES_CTRL_STANDARD;
+  if(s->opts.keyboard < 0 || s->opts.keyboard >= NES_KBD_COUNT)
+    s->opts.keyboard = NES_KBD_NONE;
+  // A keyboard plugged in means the user means to type on it
+  s->kbd_mode = s->opts.keyboard != NES_KBD_NONE;
+  memset(s->kbd_count, 0, sizeof s->kbd_count);
+  memset(s->kbd_held, 0, sizeof s->kbd_held);
 
   // FujiNet FIRST: it listens and the cartridge dials in, so the listener
   // has to exist before the machine's first transaction or the CONFIG
@@ -221,6 +229,7 @@ extern "C" int nessession_start(nessession* s, const nessession_start_opts* opts
   cfg.region = s->opts.region;
   cfg.portType[0] = s->opts.port_type[0];
   cfg.portType[1] = s->opts.port_type[1];
+  cfg.keyboard = s->opts.keyboard;
 
   MesenHost::Callbacks cb;
   cb.onStopped = [s](MesenHost::StopReason, const std::string& msg, int addr) {
@@ -529,6 +538,168 @@ extern "C" int nessession_region(nessession* s)
   if(s->running) return s->opts.region;
   return nessession_get_int(s, "region", NES_REGION_AUTO);
 }
+
+// ---- the expansion port: keyboards and the Data Recorder --------------------
+
+extern "C" void nessession_set_keyboard(nessession* s, int type)
+{
+  if(type < 0 || type >= NES_KBD_COUNT) return;
+  session_keyboard_release_all(s);
+  s->opts.keyboard = type;
+  s->kbd_mode = type != NES_KBD_NONE;
+  nessession_set_int(s, "keyboard", type);
+  if(s->running) host_of(s)->SetKeyboard(type);
+}
+
+extern "C" int nessession_keyboard(nessession* s)
+{
+  if(s->running) return s->opts.keyboard;
+  return nessession_get_int(s, "keyboard", NES_KBD_NONE);
+}
+
+extern "C" void nessession_set_keyboard_mode(nessession* s, int on)
+{
+  if(!!on == !!s->kbd_mode) return;
+  // Whatever either side holds was pressed under the other mode: let go
+  nessession_release_all(s);
+  s->kbd_mode = on ? 1 : 0;
+}
+
+extern "C" int nessession_keyboard_mode(nessession* s)
+{
+  return s->kbd_mode;
+}
+
+extern "C" int nessession_keyboard_captures(nessession* s)
+{
+  return s->running && s->kbd_mode && s->opts.keyboard != NES_KBD_NONE;
+}
+
+namespace {
+
+void keyboard_count(nessession* s, int index, int delta)
+{
+  if(index < 0 || index >= NES_KBD_MAX_KEYS) return;
+  int c = s->kbd_count[index] + delta;
+  if(c < 0) c = 0;
+  if(c > 255) c = 255;
+  const bool was = s->kbd_count[index] > 0;
+  s->kbd_count[index] = static_cast<uint8_t>(c);
+  if((c > 0) != was && s->running)
+    host_of(s)->SetKeyboardKey(index, c > 0);
+}
+
+} // namespace
+
+extern "C" int session_keyboard_key(struct nessession* s, uint32_t keysym, int down)
+{
+  if(keysym == NES_KEYSYM_SCROLL_LOCK)
+  {
+    if(!s->running || s->opts.keyboard == NES_KBD_NONE) return 0;
+    if(down) nessession_set_keyboard_mode(s, !s->kbd_mode);
+    return 1;
+  }
+  if(!nessession_keyboard_captures(s)) return 0;
+
+  if(down)
+  {
+    int free_slot = -1;
+    for(int i = 0; i < 16; i++)
+    {
+      if(s->kbd_held[i].keysym == keysym) return 1;          // auto-repeat
+      if(!s->kbd_held[i].keysym && free_slot < 0) free_slot = i;
+    }
+    const int index = nessession_keyboard_index_for_keysym(s->opts.keyboard, keysym);
+    if(index >= 0 && free_slot >= 0)
+    {
+      s->kbd_held[free_slot].keysym = keysym;
+      s->kbd_held[free_slot].index = index;
+      keyboard_count(s, index, +1);
+    }
+    return 1;                                                  // typed keys are the keyboard's
+  }
+  for(int i = 0; i < 16; i++)
+    if(s->kbd_held[i].keysym == keysym)
+    {
+      keyboard_count(s, s->kbd_held[i].index, -1);
+      s->kbd_held[i].keysym = 0;
+    }
+  return 1;
+}
+
+extern "C" void session_keyboard_release_all(struct nessession* s)
+{
+  for(int i = 0; i < NES_KBD_MAX_KEYS; i++)
+    if(s->kbd_count[i])
+    {
+      s->kbd_count[i] = 0;
+      if(s->running) host_of(s)->SetKeyboardKey(i, false);
+    }
+  memset(s->kbd_held, 0, sizeof s->kbd_held);
+}
+
+extern "C" void nessession_keyboard_press(nessession* s, int index, int down)
+{
+  if(index < 0 || index >= keyboard_key_count(s->opts.keyboard)) return;
+  keyboard_count(s, index, down ? +1 : -1);
+}
+
+extern "C" int nessession_keyboard_held(nessession* s, int index)
+{
+  if(!s->running || index < 0 || index >= NES_KBD_MAX_KEYS) return 0;
+  return host_of(s)->KeyboardKeyHeld(index) ? 1 : 0;
+}
+
+namespace {
+int tape(nessession* s, int action, const char* path)
+{
+  if(!s->running) return -1;
+  if(s->opts.keyboard != NES_KBD_FAMILY_BASIC)
+  {
+    session_set_error(s, "The Data Recorder comes with the Family BASIC Keyboard: "
+                         "choose it as the expansion port device first.");
+    return -1;
+  }
+  if(!host_of(s)->Tape(action, path ? path : ""))
+  {
+    session_set_error(s, "No Data Recorder is attached.");
+    return -1;
+  }
+  return 0;
+}
+}
+
+extern "C" int nessession_tape_play(nessession* s, const char* path)
+{
+  if(!path || !*path) return -1;
+  std::ifstream probe(path, std::ios::binary);
+  if(!probe)
+  {
+    session_set_error(s, "Cannot open %s", path);
+    return -1;
+  }
+  return tape(s, 0, path);
+}
+
+extern "C" int nessession_tape_record(nessession* s, const char* path)
+{
+  if(!path || !*path) return -1;
+  return tape(s, 1, path);
+}
+
+extern "C" int nessession_tape_stop(nessession* s)
+{
+  if(nessession_tape_state(s) != NES_TAPE_RECORDING) return 0;   // a playing tape just runs out
+  return tape(s, 2, nullptr);
+}
+
+extern "C" int nessession_tape_state(nessession* s)
+{
+  if(!s->running) return NES_TAPE_IDLE;
+  return host_of(s)->TapeState();
+}
+
+extern "C" const char* nessession_tapes_path(const nessession* s) { return s->tapes_dir; }
 
 // ---- FujiNet ---------------------------------------------------------------
 

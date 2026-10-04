@@ -56,6 +56,21 @@ desktop app. A member of the FujiNet Go desktop family
   and hats. The **Controllers** window shows both NES controllers live,
   presses buttons with the mouse, and rebinds any control to a key or
   gamepad button (Map).
+- **Keyboards on the expansion port.** Preferences / Settings → Expansion
+  port: the **Family BASIC Keyboard** (HVC-007) or the **Subor** keyboard,
+  emulated by MesenCE and switched live. While one is attached the host
+  keyboard types on it — every key, Escape, Backspace and the F-keys
+  included — and **Scroll Lock** (macOS: ⌘K; Machine ▸ Keyboard Mode
+  everywhere) hands the keys back to the controllers. Keys map by position
+  (Shift is passed through, so typed symbols follow the NES keycaps); Home is
+  CLR HOME, End is STOP, Left/Right Alt are GRPH/KANA. Gamepads keep driving
+  the controllers either way, and the Controllers window has an on-screen
+  keyboard to click. With the Family BASIC keyboard comes its **Data
+  Recorder**: Machine ▸ Data Recorder ▸ Play / Record / Stop (`.fbt` files,
+  in `tapes/` under the data directory). CONFIG detects either keyboard
+  and takes typed input in its text editor (RETURN accepts, ESC cancels);
+  programs built with fujinet-lib's `nes` target get the same through
+  `fuji_nes_kbd_detect()` / `fuji_nes_kbd_getc()`.
 
 The icon is the family mark in the console's own plastic: the dark grey of
 the front band (`#3c3c3c`) on the light grey of the shell (`#c6c6c6`). The
@@ -136,6 +151,7 @@ a slow network transaction never stalls the picture.
 | Gamepads | D-pad / left stick; South = B, East = A, West / North = turbo B / A, Back = Select, Start = Start |
 | Reset Game / Reset to CONFIG | **Backspace** / **Escape** (Ctrl+R on the menu) |
 | Fullscreen / Debugger | F11 / F12 (debugger: F5 run/stop, F7 step, F8 step over, Shift+F8 step out) |
+| Keyboard Mode | **Scroll Lock** (macOS: **⌘K**; Controllers moved to ⌘J) — while on, every key types on the attached Family BASIC / Subor keyboard; only Ctrl/⌘ menu shortcuts stay the app's |
 
 Every control is remappable in the Controllers window.
 
@@ -152,9 +168,15 @@ Every control is remappable in the Controllers window.
   the FujiNet link (`fujibus_smoke`), and a full network boot (`netboot`:
   MOUNT_HOST, SET_DEVICE_FULLPATH, MOUNT_IMAGE, the DBC push, the loader's
   32 slices, the new image running) against the in-process FujiNet.
+  `keyboard` runs a ROM that scans the Family BASIC and Subor matrices the
+  way their software does and checks that host keys and on-screen clicks
+  land on exactly the right row and bit, that Scroll Lock hands the keys
+  back, and that the Data Recorder records and plays a tape.
 - **The whole flow, driven like a user** — CONFIG lists the SD host's files
   from the in-process FujiNet; Down, A on `hello.nes`; FujiNet pushes it, the
-  loader copies it in, and it runs.
+  loader copies it in, and it runs. With the Family BASIC keyboard
+  attached, SELECT on a host opens CONFIG's editor, typed text replaces the
+  name and RETURN saves it.
 - **GNOME and KDE** — built together with no frontend warnings, desktop and
   metainfo files validated, and smoke-launched headless (GTK Broadway, Qt
   offscreen) with the debugger, Controllers and Preferences open.

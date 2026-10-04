@@ -48,7 +48,7 @@ find_package(Git QUIET)
 # fixes and the loopback connect bound. Recorded in three places -- here
 # and in both flatpak manifests
 # (build-aux/flatpak/*.yml).
-set(MESEN_COMMIT "ad1425a09b67381f4e37a6d175b19ac9003fc3b8")
+set(MESEN_COMMIT "3e463e3a44a4002d33e969a714acbc9b00520765")
 set(MESEN_URL "https://github.com/FujiNetWIFI/MesenCE")
 
 # fujinet-firmware, branch tcp-protocol-disable-nagle (c68e86303): master plus

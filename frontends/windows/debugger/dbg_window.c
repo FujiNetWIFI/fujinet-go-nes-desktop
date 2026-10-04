@@ -336,6 +336,36 @@ static void refresh_ppu(debugger *d)
     InvalidateRect(d->ppu_pic, NULL, FALSE);
 }
 
+/* The APU view is an ANSI EDIT control: spell the keyboard's UTF-8 legends
+ * (the arrows, the yen sign) in ASCII. */
+static void ascii_legends(const char *in, char *out, size_t outsz)
+{
+    static const struct { const char *utf8, *ascii; } map[] = {
+        { "\xe2\x86\x91", "Up" }, { "\xe2\x86\x93", "Down" },
+        { "\xe2\x86\x90", "Left" }, { "\xe2\x86\x92", "Right" }, { "\xc2\xa5", "Yen" },
+    };
+    size_t o = 0;
+    while (*in && o + 1 < outsz) {
+        size_t i, n = 0;
+        const char *rep = NULL;
+        for (i = 0; i < sizeof map / sizeof map[0]; i++) {
+            n = strlen(map[i].utf8);
+            if (strncmp(in, map[i].utf8, n) == 0) { rep = map[i].ascii; break; }
+        }
+        if (rep) {
+            while (*rep && o + 1 < outsz) out[o++] = *rep++;
+            in += n;
+        } else if ((unsigned char)*in < 0x80) {
+            out[o++] = *in++;
+        } else {
+            out[o++] = '?';
+            in++;
+            while (((unsigned char)*in & 0xC0) == 0x80) in++;
+        }
+    }
+    out[o] = '\0';
+}
+
 static void refresh_apu(debugger *d)
 {
     nesdebug_apu a;
@@ -364,6 +394,19 @@ static void refresh_apu(debugger *d)
             if (a.pad[port] & (1 << b))
                 len += (size_t)snprintf(s + len, sizeof s - len, " %s", names[b]);
         len += (size_t)snprintf(s + len, sizeof s - len, "\n");
+    }
+    {
+        static const char *const tape[] = { "idle", "playing", "recording" };
+        const char *kname = nes_keyboard_name(a.keyboard);
+        char held[200];
+        len += (size_t)snprintf(s + len, sizeof s - len, "\nExpansion  %s\n", kname ? kname : "?");
+        if (a.keyboard != NES_KBD_NONE) {
+            ascii_legends(a.keys_held, held, sizeof held);
+            len += (size_t)snprintf(s + len, sizeof s - len, "Keys held  %s\n", held[0] ? held : "(none)");
+        }
+        if (a.keyboard == NES_KBD_FAMILY_BASIC)
+            len += (size_t)snprintf(s + len, sizeof s - len, "Tape       %s\n",
+                                    a.tape >= 0 && a.tape < 3 ? tape[a.tape] : "?");
     }
     set_text_lf(d->apu, s);
 }

@@ -103,6 +103,7 @@ set(NES_SESSION_C_SOURCES
   src/fujinet_runtime.c
   src/audio_sdl.c
   src/bindings.c
+  src/keyboard.c
   src/hid_keys.c)
 set(NES_SESSION_CXX_SOURCES
   src/session.cpp
