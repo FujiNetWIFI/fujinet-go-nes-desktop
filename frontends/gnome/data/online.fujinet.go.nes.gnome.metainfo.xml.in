@@ -50,6 +50,14 @@
     <release version="@PROJECT_VERSION@" date="2026-10-04">
       <description>
         <p>
+          CONFIG's LOADING bar now fills as the game is pushed to the
+          cartridge, instead of sitting at 0% and jumping to 100% at boot.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-10-04">
+      <description>
+        <p>
           First release: MesenCE with the FujiNet NES cartridge, an
           in-process FujiNet, native GNOME, KDE, macOS and Windows frontends,
           both controllers on screen, hotplugged gamepads and a native
