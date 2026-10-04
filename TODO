@@ -1,0 +1,65 @@
+fujinet-go-nes-desktop -- milestone log
+======================================
+
+The plan is the family's (see fujinet-go-adam-desktop/PORTING.md): one C API
+in core/, four native frontends, FujiNet in-process, one shared settings
+store, a native debugger everywhere, no panels visible at startup,
+clone-and-build CI. Nothing below is marked done on "it compiles".
+
+M0  scaffold                                                          [x]
+  [x] carried from fujinet-go-atari2600-desktop: root CMakeLists (VERSION
+      0.1.0, FRONTEND switch, icon loop, CPack DEB/RPM/TGZ), .gitignore,
+      LICENSE, CI, flatpak manifests, NSIS, tools/
+  [x] cmake/Dependencies.cmake pins MesenCE (FujiNetWIFI/MesenCE
+      add-fujinet-support) and fujinet-firmware (c68e8630, master +
+      TCP_NODELAY, the INTV/2600 pin); MESEN_SRC / FUJINET_SRC overrides
+  [x] cmake/StageMesen.cmake: Core/ Utilities/ SevenZip/ Lua/ staged into
+      <build>/mesen-generated, keyed by HEAD + dirtiness + staging-file hash
+  [x] tools/fujinet: BoIP 11506, web UI 11507; patch 0002 adds .nes to the
+      RS232 ROM media type so CONFIG's MOUNT_IMAGE pushes it
+  [x] icons: the family mark in the console's plastic greys, #3c3c3c on
+      #c6c6c6 (tools/icons/make-icons.py); UI accent stays #c4001e
+  [x] CI: macOS is Apple Silicon only (macos.yml and release.yml)
+
+M1  the FujiNet cartridge in MesenCE (fork, add-fujinet-support)      [x]
+  [x] FujiNetCart board: arena + loader + vector page in mapper RAM, WRAM
+      gate, PRG/CHR SRAM through nesmap's slot tables as page tables (so
+      reads and debugger peeks have no side effects), mailbox writes as a
+      cycle-stamped queue with the RMW dummy-write drop, MMC3 A12 IRQ
+  [x] fujimail on a worker thread (the cart's core0): hotspot ring in,
+      published bytes drained into the arena every CPU cycle; SyncWorker
+      before HOT_SWAP so BOOTLOCK has landed
+  [x] FujiNetLink (the Stella fork's transport, Winsock fix included):
+      non-blocking, abortable, lazy redial
+  [x] FujiNetCartLoader + MapperFactory/RomLoader hooks behind
+      SetHostConfig; CONFIG from fujinet-config's nes/ build via sync.sh
+  [x] Breakpoint::Init; Emulator::Run no longer swallows an early Stop()
+  [x] MinGW portability fixes (build-aux/windows/mesen-mingw.patch)
+
+M2  host + session + debugger core                                    [x]
+  [x] core/mesen/MesenHost: renderer, audio ring with Mesen's dynamic rate,
+      virtual key manager, notifications, vsync phase lock, settings
+      (palette, volumes, rewind/run-ahead/autosave off)
+  [x] nessession: CONFIG at power-on, Open Cartridge (direct to SRAM,
+      refused with the reason when nesmap cannot map it), Reset Game,
+      Reset to CONFIG / Eject (power cycle), FujiNet first, bindings,
+      gamepad hot-plug with player memory and an event for toasts
+  [x] nesdebug over MesenCE's engine: attach/detach, synchronous steps,
+      breakpoints (exec/read/write, conditions) that survive a power cycle,
+      disassembly, labels + symbol files, PPU views, APU, cart, prompt
+  [x] ctest: session, bindings, media, gamepad, debug, fujibus_smoke,
+      netboot (needs NES_TESTROM_DIR)
+
+M3  frontends                                                         [~]
+  [x] GNOME (Broadway smoke)   [x] KDE (offscreen smoke)
+  [x] Windows: cross-build + Wine; [ ] look at it on a real Windows desktop
+  [ ] macOS: first compile is CI's (risky spots: the gamepad toast fade,
+      NSStepper, the Controllers panel's hand-computed frames)
+  [ ] screenshots for the metainfo files
+
+M4  packaging                                                         [ ]
+  [x] MesenCE add-fujinet-support pushed; MESEN_COMMIT pinned to
+      ba4abc590 (Dependencies.cmake and both flatpak manifests)
+  [x] patch 0002 (.nes ROM images) upstreamed: fujinet-firmware da3973c10
+      on nes-bringup; drop the patch once the pin includes it
+  [ ] flatpak builds, release dry run on a test tag

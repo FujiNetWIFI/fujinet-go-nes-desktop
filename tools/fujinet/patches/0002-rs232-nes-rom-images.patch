@@ -1,0 +1,24 @@
+The FujiNet NES cartridge boots .nes images: CONFIG mounts one and the
+ESP32 (here, the RS232 PC runtime) must push it to the cartridge over the DBC
+stream like any other cartridge ROM. discover_mediatype() only knows ROM,
+BIN, INT and ITV (and CHF upstream), so a .nes file mounted as a plain disk
+image and the cartridge waited forever for BOOT_READY. Add NES. Upstream
+as fujinet-firmware da3973c10 on nes-bringup; carried here until the pin
+(cmake/Dependencies.cmake) moves to a commit that has it.
+
+--- a/lib/media/rs232/diskType.cpp
++++ b/lib/media/rs232/diskType.cpp
+@@ -77,8 +77,12 @@
+         // replaces the previous disksize==8192||16384||32768 heuristic
+         // (rs232Disk::mount()), which misfired on any file of those exact
+         // sizes regardless of extension and missed every other ROM size.
++        // NES is the iNES cartridge image the FujiNet NES cartridge maps
++        // with its own nesmap; it carries its own header, so extension
++        // alone is unambiguous here too.
+         if (strcasecmp(ext, "ROM") == 0 || strcasecmp(ext, "BIN") == 0 ||
+-            strcasecmp(ext, "INT") == 0 || strcasecmp(ext, "ITV") == 0)
++            strcasecmp(ext, "INT") == 0 || strcasecmp(ext, "ITV") == 0 ||
++            strcasecmp(ext, "NES") == 0)
+         {
+             return MEDIATYPE_ROM;
+         }

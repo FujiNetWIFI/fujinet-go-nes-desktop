@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>online.fujinet.go.nes.gnome</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>FujiNet Go NES</name>
+  <summary>An NES with a built-in FujiNet</summary>
+  <description>
+    <p>
+      A self-contained NES with a FujiNet built in: browse a network host
+      from the console, boot games over the network, and let a FujiNet
+      program keep talking to the network, all in one application.
+    </p>
+    <p>
+      FujiNet's CONFIG program is built in and starts at power-on, exactly as
+      on the FujiNet NES cartridge. Local .nes cartridge images can be opened
+      in its place; Reset Game restarts whatever is running, and Reset to
+      CONFIG ejects the cartridge and brings CONFIG back.
+    </p>
+    <p>
+      The emulator is MesenCE, with the FujiNet cartridge running the real
+      cartridge firmware's own protocol and mapper sources, so it behaves as
+      the hardware does. Gamepads are picked up as they are plugged in and
+      out, and a native debugger shows the CPU, disassembly with
+      breakpoints, the PPU, the APU and the cartridge.
+    </p>
+    <p>
+      Nothing copyrighted is included: the NES has no system ROM, and the
+      only built-in program is FujiNet's own CONFIG client.
+    </p>
+  </description>
+  <launchable type="desktop-id">online.fujinet.go.nes.gnome.desktop</launchable>
+  <url type="homepage">https://fujinet.online/</url>
+  <url type="bugtracker">https://github.com/FujiNetWIFI/fujinet-go-nes-desktop/issues</url>
+  <developer id="online.fujinet">
+    <name>Thomas Cherryhomes</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <!-- The CURRENT release templates its version from @PROJECT_VERSION@, so
+         it cannot disagree with the tree; past releases are literal. The
+         release job checks that this first entry is still a template. -->
+    <release version="@PROJECT_VERSION@" date="2026-10-04">
+      <description>
+        <p>
+          First release: MesenCE with the FujiNet NES cartridge, an
+          in-process FujiNet, native GNOME, KDE, macOS and Windows frontends,
+          both controllers on screen, hotplugged gamepads and a native
+          debugger.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

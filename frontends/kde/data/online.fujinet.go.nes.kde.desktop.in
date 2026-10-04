@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=FujiNet Go NES
+GenericName=NES Emulator
+Comment=An NES with a built-in FujiNet
+Exec=fujinet-go-nes-kde %f
+Icon=online.fujinet.go.nes.kde
+Terminal=false
+Categories=Game;Emulator;Qt;
+Keywords=nes;nintendo;famicom;fujinet;emulator;retro;
+MimeType=application/x-nes-rom;
+StartupNotify=true

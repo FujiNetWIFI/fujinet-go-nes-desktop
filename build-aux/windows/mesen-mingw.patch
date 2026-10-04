@@ -1,0 +1,147 @@
+MinGW portability for MesenCE's Core/Utilities (FujiNet Go NES builds Mesen's
+C++ core with mingw-w64 -- MSYS2 UCRT64 in CI, and cross from Linux).
+
+- UTF8Util.h: open streams with const wchar_t* (decode().c_str()); the
+  std::wstring overload is MSVC-only, and every libstdc++ has the pointer one.
+- UTF8Util.cpp: the Win32 UTF-8 decode was guarded by _MSC_VER, so MinGW
+  threw "utf8::decode is not implemented" on the first file open.
+- Lower-case Windows SDK header names (<windows.h>, <ws2tcpip.h>,
+  <versionhelpers.h>, <d3d9.h>): mingw-w64's headers live on a
+  case-sensitive filesystem when cross-compiling.
+- PlatformUtilities.cpp: include <mmsystem.h> for timeBeginPeriod, which a
+  WIN32_LEAN_AND_MEAN windows.h leaves out.
+- UPnPPortMapper.cpp: mingw-w64 has no natupnp.h; UPnP is only used by
+  netplay, so MinGW gets the existing non-Windows stub.
+
+Apply in a MesenCE checkout with: git apply mesen-mingw.patch
+
+diff --git a/Utilities/PlatformUtilities.cpp b/Utilities/PlatformUtilities.cpp
+index 14676d39..ea1cb8e4 100644
+--- a/Utilities/PlatformUtilities.cpp
++++ b/Utilities/PlatformUtilities.cpp
+@@ -2,7 +2,8 @@
+ #include "PlatformUtilities.h"
+ 
+ #ifdef _WIN32
+-	#include <Windows.h>
++	#include <windows.h>
++	#include <mmsystem.h>
+ #else
+ 	#if defined(__x86_64__) || defined(_M_X64)
+ 		#include <immintrin.h>
+diff --git a/Utilities/Socket.cpp b/Utilities/Socket.cpp
+index 08610778..1ff2f47d 100644
+--- a/Utilities/Socket.cpp
++++ b/Utilities/Socket.cpp
+@@ -9,8 +9,8 @@ using namespace std;
+ 	#pragma comment(lib, "ws2_32.lib") //Winsock Library
+ 	#define WIN32_LEAN_AND_MEAN
+ 	#include <winsock2.h>
+-	#include <Ws2tcpip.h>
+-	#include <Windows.h>
++	#include <ws2tcpip.h>
++	#include <windows.h>
+ #else
+ 	#include <sys/types.h>
+ 	#include <sys/socket.h>
+diff --git a/Utilities/UPnPPortMapper.cpp b/Utilities/UPnPPortMapper.cpp
+index 5af6ade8..db424cda 100644
+--- a/Utilities/UPnPPortMapper.cpp
++++ b/Utilities/UPnPPortMapper.cpp
+@@ -1,13 +1,14 @@
+ #include "pch.h"
+ #include "UPnPPortMapper.h"
+ 
+-#ifdef _WIN32
++//MinGW has no natupnp.h; UPnP is only used by netplay, so it gets the stub
++#if defined(_WIN32) && !defined(__MINGW32__)
+ 	#include <winsock2.h>
+ 	#include <natupnp.h>
+ 	#include <ws2tcpip.h>
+ #endif
+ 
+-#ifdef _WIN32
++#if defined(_WIN32) && !defined(__MINGW32__)
+ bool UPnPPortMapper::AddNATPortMapping(uint16_t internalPort, uint16_t externalPort, IPProtocol protocol)
+ {
+ 	bool result = false;
+diff --git a/Utilities/UTF8Util.cpp b/Utilities/UTF8Util.cpp
+index 5d5c8658..930058b6 100644
+--- a/Utilities/UTF8Util.cpp
++++ b/Utilities/UTF8Util.cpp
+@@ -7,9 +7,11 @@
+ 	#include <cuchar>
+ #endif
+ 
+-#ifdef _MSC_VER
+-	#define WIN32_LEAN_AND_MEAN
+-	#include <Windows.h>
++#ifdef _WIN32
++	#ifndef WIN32_LEAN_AND_MEAN
++		#define WIN32_LEAN_AND_MEAN
++	#endif
++	#include <windows.h>
+ 	#undef WIN32_LEAN_AND_MEAN
+ #endif
+ 
+@@ -17,7 +19,7 @@ namespace utf8
+ {
+ 	std::wstring utf8::decode(const std::string& str)
+ 	{
+-#ifdef _MSC_VER
++#ifdef _WIN32
+ 		std::wstring ret;
+ 		int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.length(), NULL, 0);
+ 		if(len > 0) {
+diff --git a/Utilities/UTF8Util.h b/Utilities/UTF8Util.h
+index 2f77663a..b5f3be86 100644
+--- a/Utilities/UTF8Util.h
++++ b/Utilities/UTF8Util.h
+@@ -16,17 +16,17 @@ namespace utf8
+ 	class ifstream : public std::ifstream
+ 	{
+ 	public:
+-		ifstream(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) : std::ifstream(utf8::decode(_Str), _Mode) {}
++		ifstream(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) : std::ifstream(utf8::decode(_Str).c_str(), _Mode) {}
+ 		ifstream() : std::ifstream() {}
+-		void open(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) { std::ifstream::open(utf8::decode(_Str), _Mode); }
++		void open(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) { std::ifstream::open(utf8::decode(_Str).c_str(), _Mode); }
+ 	};
+ 
+ 	class ofstream : public std::ofstream
+ 	{
+ 	public:
+-		ofstream(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) : std::ofstream(utf8::decode(_Str), _Mode) {}
++		ofstream(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) : std::ofstream(utf8::decode(_Str).c_str(), _Mode) {}
+ 		ofstream() : std::ofstream() {}
+-		void open(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) { std::ofstream::open(utf8::decode(_Str), _Mode); }
++		void open(const std::string& _Str, ios_base::openmode _Mode = ios_base::in) { std::ofstream::open(utf8::decode(_Str).c_str(), _Mode); }
+ 	};
+ #else
+ 	using std::ifstream;
+diff --git a/Utilities/Video/LibrashaderUtilities.h b/Utilities/Video/LibrashaderUtilities.h
+index 2f23623b..78571bc4 100644
+--- a/Utilities/Video/LibrashaderUtilities.h
++++ b/Utilities/Video/LibrashaderUtilities.h
+@@ -5,7 +5,7 @@
+ #include "Utilities/StringUtilities.h"
+ 
+ #ifdef _WIN32
+-	#include <VersionHelpers.h>
++	#include <versionhelpers.h>
+ #endif
+ 
+ struct ShaderParamDefinition
+diff --git a/Utilities/Video/librashader.h b/Utilities/Video/librashader.h
+index ae0e8ec9..3340d79c 100644
+--- a/Utilities/Video/librashader.h
++++ b/Utilities/Video/librashader.h
+@@ -41,7 +41,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ #include <d3d12.h>
+ #endif
+ #if defined(_WIN32) && defined(LIBRA_RUNTIME_D3D9)
+-#include <D3D9.h>
++#include <d3d9.h>
+ #endif
+ #if defined(__APPLE__) && defined(LIBRA_RUNTIME_METAL) && defined(__OBJC__)
+ #import <Metal/Metal.h>
