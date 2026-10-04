@@ -43,12 +43,12 @@
 
 find_package(Git QUIET)
 
-# MesenCE, branch add-fujinet-support (d652daab): the FujiNet NES cartridge
-# and its Family BASIC-style CONFIG, Breakpoint::Init, the Run()/Stop() race
-# fix, the MinGW portability fixes and the loopback connect bound. Recorded
-# in three places -- here and in both flatpak manifests
-# (build-aux/flatpak/*.yml).
-set(MESEN_COMMIT "d652daab2e9c4815faade6e7fb47125fe85f572b")
+# MesenCE, branch add-fujinet-support (4f148010): the FujiNet NES cartridge
+# and its Family BASIC-style CONFIG with a live LOADING progress and byte
+# count, Breakpoint::Init, the Run()/Stop() race fix, the MinGW portability
+# fixes and the loopback connect bound. Recorded in three places -- here and
+# in both flatpak manifests (build-aux/flatpak/*.yml).
+set(MESEN_COMMIT "4f148010140ae1131eba661f2123024875d44aa8")
 set(MESEN_URL "https://github.com/FujiNetWIFI/MesenCE")
 
 # fujinet-firmware, branch tcp-protocol-disable-nagle (c68e86303): master plus
