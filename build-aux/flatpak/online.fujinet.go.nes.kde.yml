@@ -108,7 +108,7 @@ modules:
       # Core/Shared/Emulator.cpp (the SENTINEL) already here.
       - type: git
         url: https://github.com/FujiNetWIFI/MesenCE
-        commit: 3e463e3a44a4002d33e969a714acbc9b00520765
+        commit: d652daab2e9c4815faade6e7fb47125fe85f572b
         dest: third_party/MesenCE
       # Pinned exactly as cmake/Dependencies.cmake. nes_provide_dependency()
       # skips its own fetch once it finds build.sh (the SENTINEL) already here.
