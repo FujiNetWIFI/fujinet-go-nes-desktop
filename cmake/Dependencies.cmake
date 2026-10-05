@@ -48,7 +48,7 @@ find_package(Git QUIET)
 # count, Breakpoint::Init, the Run()/Stop() race fix, the MinGW portability
 # fixes and the loopback connect bound. Recorded in three places -- here and
 # in both flatpak manifests (build-aux/flatpak/*.yml).
-set(MESEN_COMMIT "4f148010140ae1131eba661f2123024875d44aa8")
+set(MESEN_COMMIT "4e9bf48f88f7bc93c372324bdc6ac88125d6980d")
 set(MESEN_URL "https://github.com/FujiNetWIFI/MesenCE")
 
 # fujinet-firmware, branch tcp-protocol-disable-nagle (c68e86303): master plus
