@@ -14,7 +14,7 @@ endif()
 # The version lives here and nowhere else: the About boxes, the macOS bundle
 # and the release workflow all take it from PROJECT_VERSION, and cutting a tag
 # checks that the tag agrees with it (see "Cutting a release" in the README).
-project(fujinet-go-nes-desktop VERSION 0.1.1 LANGUAGES C CXX)
+project(fujinet-go-nes-desktop VERSION 0.1.2 LANGUAGES C CXX)
 
 add_compile_definitions(NES_VERSION_STRING="${PROJECT_VERSION}")
 
