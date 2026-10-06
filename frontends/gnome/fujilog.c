@@ -1,17 +1,13 @@
 /*
  * The FujiNet console log window: a live view of the in-process runtime's
- * captured output, refreshed once a second. And the configuration window,
- * which is the FujiNet web UI in a WebKitGTK view when one was built in.
+ * captured output, refreshed once a second. And the configuration, which is
+ * the FujiNet web UI in the system browser.
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "fujilog.h"
-
-#ifdef HAVE_WEBKIT
-#include <webkit/webkit.h>
-#endif
 
 typedef struct {
     GtkWindow *win;
@@ -108,33 +104,7 @@ void nes_fujilog_show(GtkWindow *parent, nessession *session)
 
 void nes_fujiconfig_show(GtkWindow *parent, nessession *session)
 {
-    const char *url = nessession_fujinet_webui_url(session);
-#ifdef HAVE_WEBKIT
-    static GtkWindow *existing;
-    GtkWidget *web, *toolbar;
-
-    if (existing) {
-        gtk_window_present(existing);
-        return;
-    }
-    web = webkit_web_view_new();
-    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(web), url);
-    gtk_widget_set_vexpand(web, TRUE);
-
-    existing = GTK_WINDOW(adw_window_new());
-    gtk_window_set_title(existing, "FujiNet Configuration");
-    gtk_window_set_default_size(existing, 1000, 760);
-    gtk_window_set_transient_for(existing, parent);
-    gtk_window_set_application(existing, gtk_window_get_application(parent));
-    toolbar = adw_toolbar_view_new();
-    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), adw_header_bar_new());
-    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), web);
-    adw_window_set_content(ADW_WINDOW(existing), toolbar);
-    g_object_add_weak_pointer(G_OBJECT(existing), (gpointer *)&existing);
-    gtk_window_present(existing);
-#else
-    GtkUriLauncher *l = gtk_uri_launcher_new(url);
+    GtkUriLauncher *l = gtk_uri_launcher_new(nessession_fujinet_webui_url(session));
     gtk_uri_launcher_launch(l, parent, NULL, NULL, NULL);
     g_object_unref(l);
-#endif
 }

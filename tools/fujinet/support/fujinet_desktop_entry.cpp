@@ -595,7 +595,7 @@ FUJINET_ENTRY bool fujinet_desktop_start_runtime(
                 config,
                 "-s",
                 sd,
-                // Web admin UI on the port the host app's webview points at.
+                // Web admin UI on the port the host app opens in the browser.
                 "-u",
                 webui_bind,
             };

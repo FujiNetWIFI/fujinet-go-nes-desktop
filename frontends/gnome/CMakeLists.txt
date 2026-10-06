@@ -34,20 +34,6 @@ target_compile_options(fujinet-go-nes-gnome PRIVATE -Wall -Wextra)
 target_compile_definitions(fujinet-go-nes-gnome PRIVATE
   NES_SOURCE_ICON_DIR="${CMAKE_SOURCE_DIR}/data/icons")
 
-# The FujiNet web UI, embedded when WebKitGTK is available and WITH_WEBVIEW
-# is on; otherwise the configuration opens in the system browser. Never a
-# hard dependency.
-if(WITH_WEBVIEW)
-  pkg_check_modules(WEBKIT IMPORTED_TARGET webkitgtk-6.0)
-  if(WEBKIT_FOUND)
-    target_link_libraries(fujinet-go-nes-gnome PRIVATE PkgConfig::WEBKIT)
-    target_compile_definitions(fujinet-go-nes-gnome PRIVATE HAVE_WEBKIT=1)
-    message(STATUS "gnome frontend: embedding the FujiNet web UI (WebKitGTK)")
-  else()
-    message(STATUS "gnome frontend: webkitgtk-6.0 not found -- the FujiNet web UI opens in the browser")
-  endif()
-endif()
-
 install(TARGETS fujinet-go-nes-gnome RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # The desktop entry and AppStream metainfo are validated as ctests rather than

@@ -15,9 +15,6 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
-#ifdef HAVE_WEBENGINE
-#include <QWebEngineView>
-#endif
 
 QColor nesAccentColor()
 {
@@ -69,26 +66,6 @@ void fujinet_log_show(QWidget *parent, nessession *session)
 
 void fujinet_config_show(QWidget *parent, nessession *session)
 {
-    const QUrl url(QString::fromUtf8(nessession_fujinet_webui_url(session)));
-#ifdef HAVE_WEBENGINE
-    static QPointer<QWidget> win;
-    if (win) {
-        win->raise();
-        win->activateWindow();
-        return;
-    }
-    win = new QWidget(parent, Qt::Window);
-    win->setAttribute(Qt::WA_DeleteOnClose);
-    win->setWindowTitle(QStringLiteral("FujiNet Configuration"));
-    win->resize(1000, 760);
-    auto *view = new QWebEngineView(win);
-    view->load(url);
-    auto *layout = new QVBoxLayout(win);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(view);
-    win->show();
-#else
     (void)parent;
-    QDesktopServices::openUrl(url);
-#endif
+    QDesktopServices::openUrl(QUrl(QString::fromUtf8(nessession_fujinet_webui_url(session))));
 }

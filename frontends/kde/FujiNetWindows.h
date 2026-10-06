@@ -14,8 +14,9 @@ extern "C" {
 
 /* Shows (raising an existing one) the FujiNet console log window. */
 void fujinet_log_show(QWidget *parent, nessession *session);
-/* Shows the FujiNet web UI: embedded with QtWebEngine when built with it,
- * otherwise in the system browser. */
+/* Opens the FujiNet web UI in the system browser. Not embedded: the web UI's
+ * Google and OneDrive Authorize buttons open the provider's consent page in a
+ * new tab, and both providers refuse OAuth from an embedded web view. */
 void fujinet_config_show(QWidget *parent, nessession *session);
 
 /* The accent colour, for highlights. */

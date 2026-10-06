@@ -36,11 +36,6 @@ endif()
 set(FRONTEND "all" CACHE STRING
     "Frontend to build: gnome, kde, macos, windows, all, none")
 
-# Embed the FujiNet web UI (WebKitGTK on GNOME, QtWebEngine on KDE) instead of
-# opening it in the system browser. Never a hard dependency: when the engine
-# is missing the frontend falls back to the browser.
-option(WITH_WEBVIEW "Embed the FujiNet web UI (WebKitGTK / QtWebEngine)" ON)
-
 # There is no ROM option, unlike most siblings: the NES has no BIOS, and the
 # only built-in image is FujiNet's own CONFIG client, which the MesenCE fork's
 # FujiNet cartridge embeds (Core/NES/Mappers/Homebrew/FujiNet/fujiconfigrom.h).

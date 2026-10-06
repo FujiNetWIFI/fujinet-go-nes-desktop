@@ -30,21 +30,6 @@ target_compile_options(fujinet-go-nes-kde PRIVATE -Wall -Wextra)
 target_compile_definitions(fujinet-go-nes-kde PRIVATE
   NES_SOURCE_ICON_DIR="${CMAKE_SOURCE_DIR}/data/icons")
 
-# The FujiNet web UI, embedded with QtWebEngine when available and
-# WITH_WEBVIEW is on; otherwise the configuration opens in the system
-# browser. Never a hard dependency: QtWebEngine is enormous and absent on
-# many systems.
-if(WITH_WEBVIEW)
-  find_package(Qt6 COMPONENTS WebEngineWidgets QUIET)
-  if(Qt6WebEngineWidgets_FOUND)
-    target_link_libraries(fujinet-go-nes-kde PRIVATE Qt6::WebEngineWidgets)
-    target_compile_definitions(fujinet-go-nes-kde PRIVATE HAVE_WEBENGINE=1)
-    message(STATUS "kde frontend: embedding the FujiNet web UI (QtWebEngine)")
-  else()
-    message(STATUS "kde frontend: QtWebEngine not found -- the FujiNet web UI opens in the browser")
-  endif()
-endif()
-
 install(TARGETS fujinet-go-nes-kde RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 configure_file(data/online.fujinet.go.nes.kde.desktop.in
