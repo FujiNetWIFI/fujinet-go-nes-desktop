@@ -46,6 +46,16 @@
     <release version="@PROJECT_VERSION@" date="2026-10-05">
       <description>
         <p>
+          The FujiNet web UI opens in the system browser instead of an
+          embedded web view, so its Google and OneDrive Authorize buttons
+          work: they open the provider's consent page in a new tab, and the
+          web UI notices when authorization completes.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.2" date="2026-10-05">
+      <description>
+        <p>
           CONFIG's HOST SLOTS can boot the game lobby, and shows the FujiNet
           logo; the file browser shows the logo faded behind the list and a
           scroll bar. The cartridge's FujiNet signature no longer reads
