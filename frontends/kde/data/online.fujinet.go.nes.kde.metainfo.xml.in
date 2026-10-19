@@ -46,6 +46,14 @@
     <release version="@PROJECT_VERSION@" date="2026-10-19">
       <description>
         <p>
+          Debugger: a FujiNet tab shows every FujiBus packet between the NES
+          cartridge and FujiNet, both ways, with hex.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.4" date="2026-10-19">
+      <description>
+        <p>
           A new icon in the NES console's own colours: the FujiNet mark in
           Nintendo red on the console's two-tone grey.
         </p>
