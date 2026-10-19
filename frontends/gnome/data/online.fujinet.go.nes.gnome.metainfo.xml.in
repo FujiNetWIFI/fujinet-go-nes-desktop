@@ -47,7 +47,15 @@
     <!-- The CURRENT release templates its version from @PROJECT_VERSION@, so
          it cannot disagree with the tree; past releases are literal. The
          release job checks that this first entry is still a template. -->
-    <release version="@PROJECT_VERSION@" date="2026-10-05">
+    <release version="@PROJECT_VERSION@" date="2026-10-19">
+      <description>
+        <p>
+          A new icon in the NES console's own colours: the FujiNet mark in
+          Nintendo red on the console's two-tone grey.
+        </p>
+      </description>
+    </release>
+    <release version="0.1.3" date="2026-10-05">
       <description>
         <p>
           The FujiNet web UI opens in the system browser instead of an
