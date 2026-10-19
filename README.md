@@ -72,10 +72,11 @@ desktop app. A member of the FujiNet Go desktop family
   programs built with fujinet-lib's `nes` target get the same through
   `fuji_nes_kbd_detect()` / `fuji_nes_kbd_getc()`.
 
-The icon is the family mark in the console's own plastic: the dark grey of
-the front band (`#3c3c3c`) on the light grey of the shell (`#c6c6c6`). The
-UI accent is the NES logo's red (`#c4001e`), marking held buttons, the Map
-target, the current line in the disassembly and the Run button while
+The icon is the family mark in the console's own livery: the red of the
+Nintendo lettering (`#c4001e`) around a dark grey centre (`#3c3c3c`), on the
+two-tone shell, light grey (`#c6c6c6`) over the darker grey of the lower
+front (`#808080`). The same red is the UI accent, marking held buttons, the
+Map target, the current line in the disassembly and the Run button while
 stopped.
 
 ## Building

@@ -78,8 +78,9 @@ themselves (`core/tests/test_rom.h`).
 ## Icon and name
 
 The icon is the FujiNet Go family mark (the same artwork as the other
-desktops) recoloured in the NES console's plastic greys, `#3c3c3c` on
-`#c6c6c6` (`tools/icons/make-icons.py`).
+desktops) recoloured in the NES console's livery: `#c4001e` red with a
+`#3c3c3c` centre, on a `#c6c6c6` / `#808080` two-tone grey
+(`tools/icons/make-icons.py`).
 "Nintendo", "Nintendo Entertainment System", "NES" and "Famicom" are
 trademarks of Nintendo; they are used here to name the machine being
 emulated, and the project is not affiliated with or endorsed by Nintendo.

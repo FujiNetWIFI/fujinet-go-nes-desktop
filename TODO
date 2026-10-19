@@ -17,8 +17,8 @@ M0  scaffold                                                          [x]
       <build>/mesen-generated, keyed by HEAD + dirtiness + staging-file hash
   [x] tools/fujinet: BoIP 11506, web UI 11507; patch 0002 adds .nes to the
       RS232 ROM media type so CONFIG's MOUNT_IMAGE pushes it
-  [x] icons: the family mark in the console's plastic greys, #3c3c3c on
-      #c6c6c6 (tools/icons/make-icons.py); UI accent stays #c4001e
+  [x] icons: the family mark in #c4001e red (the UI accent) with a #3c3c3c
+      centre, on the #c6c6c6 / #808080 two-tone shell (tools/icons/make-icons.py)
   [x] CI: macOS is Apple Silicon only (macos.yml and release.yml)
 
 M1  the FujiNet cartridge in MesenCE (fork, add-fujinet-support)      [x]

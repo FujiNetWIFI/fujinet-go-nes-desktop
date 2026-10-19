@@ -7,17 +7,20 @@ copied from fujinet-go-intv-desktop's own copy -- composited over this
 product's own background colour, so the whole family reads as one product
 line while each target still gets a distinct badge colour.
 
-One thing is specific to this target: the colours are the NES console's own
-plastic. The background is the light grey of the console's shell (#C6C6C6)
-and the mark is drawn in the dark grey of its front band and cartridge door
-(#3C3C3C). The family mark is white discs and lines around a black centre
-disc, so it is recoloured by brightness rather than inverted: white becomes
-the dark grey and black the light grey (antialiased edges blend between
-them), which leaves the centre disc reading as a hole in the band, as the
-2600's inverted mark does.
+One thing is specific to this target: the badge is the NES console's own
+livery (user's call, 2026-10-19). The background is the two-tone shell: the
+light grey of the lid (#C6C6C6) over a strip of the darker grey of the
+lower front (#808080), split by a thin seam in the dark grey of the front
+band (#3C3C3C). The mark is the red of the "Nintendo" lettering, the same
+#C4001E as the UI accent (NESSESSION_ACCENT_RGB). The family mark is white
+discs and lines around a black centre disc, so it is recoloured by
+brightness: white becomes the red and black the dark grey (antialiased
+edges blend between them), which reads as the controller's red A and B
+buttons on its dark face.
 
-The UI accent stays the NES logo's red (NESSESSION_ACCENT_RGB): a grey
-highlight would not read as one.
+The strip sits below the mark (its lowest line ends at ~0.82 of the edge),
+so the red never crosses the darker grey. Like the rounded square it is
+drawn at 4x, so the seam is antialiased.
 
 Everything else about the composite (rounded-square mask, corner radius,
 foreground zoom, output sizes) matches the sibling repos' own
@@ -25,7 +28,7 @@ tools/icons/make-icons.py exactly.
 
 The results are committed (data/icons/hicolor/..., data/icons/*.icns,
 frontends/windows/app.ico) so building the project needs no image tooling;
-re-run this only when the artwork or background colour changes:
+re-run this only when the artwork, colours or strip change:
 
     python3 tools/icons/make-icons.py
 """
@@ -41,9 +44,13 @@ OUTDIR = ROOT / "data/icons/hicolor"
 ICNS_OUT = ROOT / "data/icons/fujinet-go-nes.icns"
 ICO_OUT = ROOT / "frontends/windows/app.ico"
 
-BACKGROUND = (0xC6, 0xC6, 0xC6, 0xFF)    # #C6C6C6, the console's light grey shell
-MARK = (0x3C, 0x3C, 0x3C)                # #3C3C3C, its dark grey front band
-MASTER = 1024                            # render big, downsample with LANCZOS
+BACKGROUND = (0xC6, 0xC6, 0xC6, 0xFF)    # #C6C6C6, the console's light grey lid
+FRONT = (0x80, 0x80, 0x80, 0xFF)         # #808080, its darker grey lower front
+BAND = (0x3C, 0x3C, 0x3C)                # #3C3C3C, its dark grey front band
+MARK = (0xC4, 0x00, 0x1E)                # #C4001E, the "Nintendo" red
+FRONT_TOP = 0.86                         # where the strip starts, fraction of the edge
+SEAM = 0.008                             # seam height, fraction of the edge
+MASTER = 1024                           # render big, downsample with LANCZOS
 CORNER_RADIUS = 0.22                     # fraction of the edge
 FOREGROUND_ZOOM = 1.18                   # Android's mask crops; compensate a little
 SIZES = (16, 24, 32, 48, 64, 128, 192, 256, 512)
@@ -53,24 +60,32 @@ ICNS_SIZES = (32, 64, 128, 256, 512, 1024)  # every size macOS's icns TOC refere
 def render_master() -> Image.Image:
     art = Image.open(FOREGROUND).convert("RGBA")
     # Recolour by brightness (alpha untouched: it is the mark's shape):
-    # white -> MARK, black -> BACKGROUND, edges in between.
+    # white -> MARK, black -> BAND, edges in between.
     r, g, b, a = art.split()
     lum = Image.merge("RGB", (r, g, b)).convert("L")
-    dark = Image.new("RGB", art.size, MARK)
-    light = Image.new("RGB", art.size, BACKGROUND[:3])
-    art = Image.composite(dark, light, lum).convert("RGBA")
+    red = Image.new("RGB", art.size, MARK)
+    dark = Image.new("RGB", art.size, BAND)
+    art = Image.composite(red, dark, lum).convert("RGBA")
     art.putalpha(a)
 
-    # Rounded-square background on a transparent canvas, drawn at 4x and
-    # downsampled so the corners are antialiased.
+    # The two-tone shell, masked to a rounded square on a transparent
+    # canvas, drawn at 4x and downsampled so the corners and seam are
+    # antialiased.
     scale = 4
-    big = Image.new("RGBA", (MASTER * scale, MASTER * scale), (0, 0, 0, 0))
-    ImageDraw.Draw(big).rounded_rectangle(
-        (0, 0, MASTER * scale - 1, MASTER * scale - 1),
-        radius=int(MASTER * scale * CORNER_RADIUS),
-        fill=BACKGROUND,
+    edge = MASTER * scale
+    shell = Image.new("RGBA", (edge, edge), BACKGROUND)
+    draw = ImageDraw.Draw(shell)
+    top = int(edge * FRONT_TOP)
+    draw.rectangle((0, top, edge, edge), fill=FRONT)
+    draw.rectangle((0, top, edge, int(edge * (FRONT_TOP + SEAM))), fill=BAND)
+    mask = Image.new("L", (edge, edge), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, edge - 1, edge - 1),
+        radius=int(edge * CORNER_RADIUS),
+        fill=255,
     )
-    icon = big.resize((MASTER, MASTER), Image.LANCZOS)
+    shell.putalpha(mask)
+    icon = shell.resize((MASTER, MASTER), Image.LANCZOS)
 
     art_size = int(MASTER * FOREGROUND_ZOOM)
     art = art.resize((art_size, art_size), Image.LANCZOS)
