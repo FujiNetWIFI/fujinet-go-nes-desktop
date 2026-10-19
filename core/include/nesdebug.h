@@ -190,6 +190,23 @@ void nesdebug_cart_get(nesdebug *d, nesdebug_cart *out);
 /* One line: "FujiNet cartridge: CONFIG, mapper 0 (NROM), link up". */
 int  nesdebug_cart_info(nesdebug *d, char *dst, int dstsz);
 
+/* ---- FujiNet: the cartridge's link, as FujiBus packets ---------------------- */
+typedef struct {
+    uint64_t serial;
+    int      to_host;       /* 1: FujiNet -> NES, 0: NES -> FujiNet */
+    int      device, command, length;   /* from the FujiBus header, -1 if short */
+    int      nbytes;
+    uint8_t  data[64];      /* the decoded packet's first bytes */
+    char     text[96];      /* "NES -> FujiNet 70 F4 READ HOST SLOTS (6 bytes)" */
+    uint32_t repeat;        /* the same exchange this many times in a row (xN) */
+} nesdebug_fuji_packet;
+/* Always on from the session's start, attached or not: the newest `max`
+ * packets, oldest first. Returns the count. */
+int  nesdebug_fujinet_trace(nesdebug *d, nesdebug_fuji_packet *out, int max);
+void nesdebug_fujinet_trace_clear(nesdebug *d);
+/* The link's state for the FujiNet tab, as text lines. Returns length. */
+int  nesdebug_fujinet_state(nesdebug *d, char *dst, int dstsz);
+
 /* ---- breakpoints -------------------------------------------------------------- */
 typedef enum { NESDEBUG_BP_EXEC = 1, NESDEBUG_BP_READ = 2, NESDEBUG_BP_WRITE = 4 } nesdebug_bp_type;
 typedef struct {

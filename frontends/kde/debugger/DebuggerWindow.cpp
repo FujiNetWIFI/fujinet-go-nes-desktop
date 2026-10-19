@@ -18,6 +18,7 @@
 #include <QPixmap>
 #include <QPointer>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -27,6 +28,8 @@
 #include "../FujiNetWindows.h"
 
 #define DISASM_WINDOW 48
+#define TRACE_MAX 512
+#define TAB_FUJINET 7      /* the last tab */
 
 namespace {
 
@@ -68,6 +71,43 @@ QString hx(unsigned v, int digits)
     return QStringLiteral("%1").arg(v, digits, 16, QLatin1Char('0')).toUpper();
 }
 
+QLabel *titleLabel(const QString &text)
+{
+    auto *l = new QLabel(text);
+    QFont f = l->font();
+    f.setBold(true);
+    l->setFont(f);
+    return l;
+}
+
+QLabel *hintLabel(const QString &text)
+{
+    auto *l = new QLabel(text);
+    l->setStyleSheet(QStringLiteral("color: gray;"));
+    l->setWordWrap(true);
+    return l;
+}
+
+/* Whether a view's reader is at its end (a log then follows new lines). */
+bool atEnd(QPlainTextEdit *v)
+{
+    return v->verticalScrollBar()->value() >= v->verticalScrollBar()->maximum() - 1;
+}
+
+/* Replaces a view's text where the reader left it (a refresh must not throw
+ * a scrolled view back to its top), or, following, at its end. */
+void setText(QPlainTextEdit *v, const QString &text, bool follow = false)
+{
+    if (v->toPlainText() == text) {
+        if (follow) v->verticalScrollBar()->setValue(v->verticalScrollBar()->maximum());
+        return;
+    }
+    const int top = v->verticalScrollBar()->value(), left = v->horizontalScrollBar()->value();
+    v->setPlainText(text);
+    v->verticalScrollBar()->setValue(follow ? v->verticalScrollBar()->maximum() : top);
+    v->horizontalScrollBar()->setValue(left);
+}
+
 QPointer<DebuggerWindow> s_win;
 
 } // namespace
@@ -99,7 +139,7 @@ DebuggerWindow::DebuggerWindow(nessession *session, QWidget *parent)
     auto *central = new QWidget;
     auto *root = new QVBoxLayout(central);
     root->addWidget(buildToolbar());
-    auto *tabs = new QTabWidget;
+    auto *tabs = m_tabs = new QTabWidget;
     tabs->addTab(buildPrompt(), QStringLiteral("Prompt"));
     tabs->addTab(buildCpu(), QStringLiteral("CPU && RAM"));
     tabs->addTab(buildDisasm(), QStringLiteral("Disassembly"));
@@ -107,8 +147,12 @@ DebuggerWindow::DebuggerWindow(nessession *session, QWidget *parent)
     tabs->addTab(buildApu(), QStringLiteral("APU && Input"));
     tabs->addTab(buildBreaks(), QStringLiteral("Breakpoints"));
     tabs->addTab(buildCart(), QStringLiteral("Cart"));
+    tabs->addTab(buildFujinet(), QStringLiteral("FujiNet"));
     if (qEnvironmentVariableIsSet("NES_DEBUGGER_TAB"))
         tabs->setCurrentIndex(qEnvironmentVariableIntValue("NES_DEBUGGER_TAB"));
+    connect(tabs, &QTabWidget::currentChanged, this, [this](int page) {
+        if (page == TAB_FUJINET) refreshFujinet(false);
+    });
     root->addWidget(tabs, 1);
     setCentralWidget(central);
 
@@ -416,6 +460,40 @@ QWidget *DebuggerWindow::buildCart()
     return m_cart;
 }
 
+QWidget *DebuggerWindow::buildFujinet()
+{
+    auto *split = new QSplitter(Qt::Horizontal);
+    auto *left = new QWidget;
+    auto *lv = new QVBoxLayout(left);
+    lv->addWidget(titleLabel(QStringLiteral("FujiBus packets (SLIP-decoded)")));
+    auto *row = new QHBoxLayout;
+    m_fujiNote = hintLabel(QString());
+    auto *clear = new QPushButton(QStringLiteral("Clear"));
+    connect(clear, &QPushButton::clicked, this, [this] {
+        nesdebug_fujinet_trace_clear(m_dbg);
+        refreshFujinet(true);
+    });
+    row->addWidget(m_fujiNote, 1);
+    row->addWidget(clear);
+    lv->addLayout(row);
+    m_fujiText = monoView(false);
+    lv->addWidget(m_fujiText, 1);
+    left->setMinimumWidth(560);
+
+    auto *right = new QWidget;
+    auto *rv = new QVBoxLayout(right);
+    rv->addWidget(titleLabel(QStringLiteral("The cartridge's link")));
+    m_fujiState = monoView(false);
+    rv->addWidget(m_fujiState, 1);
+    right->setMinimumWidth(320);
+    split->addWidget(left);
+    split->addWidget(right);
+    split->setStretchFactor(0, 3);
+    split->setStretchFactor(1, 2);
+    split->setChildrenCollapsible(false);
+    return split;
+}
+
 /* ---- refresh -------------------------------------------------------------- */
 
 void DebuggerWindow::refreshStatus()
@@ -628,15 +706,53 @@ void DebuggerWindow::refreshCart()
     m_cart->setPlainText(s);
 }
 
+/* The note and the link's state always; the log only when it changed. */
+void DebuggerWindow::refreshFujinet(bool force)
+{
+    static nesdebug_fuji_packet p[TRACE_MAX];
+    static char state[2048];
+    const int n = nesdebug_fujinet_trace(m_dbg, p, TRACE_MAX);
+    if (!nessession_is_running(m_session))
+        m_fujiNote->setText(QStringLiteral("The NES is off."));
+    else if (!nessession_fujinet_running(m_session))
+        m_fujiNote->setText(QStringLiteral("FujiNet is off (Preferences ▸ Host ▸ Enable FujiNet)."));
+    else
+        m_fujiNote->setText(nessession_cart_link_up(m_session) == 1
+                                ? QStringLiteral("FujiNet is on; the cartridge is connected.")
+                                : QStringLiteral("FujiNet is on; the cartridge is not connected."));
+    state[0] = '\0';
+    nesdebug_fujinet_state(m_dbg, state, sizeof state);
+    setText(m_fujiState, QString::fromUtf8(state));
+
+    if (!force && n == m_fujiCount && (n == 0 || p[n - 1].serial == m_fujiLast)) return;
+    m_fujiCount = n;
+    m_fujiLast = n > 0 ? p[n - 1].serial : 0;
+    QString t;
+    for (int i = 0; i < n; ++i) {
+        if (i) t += QLatin1Char('\n');
+        t += QString::fromUtf8(p[i].text) + QStringLiteral("\n     ");
+        for (int k = 0; k < p[i].nbytes && k < (int)sizeof p[i].data; k++)
+            t += hx(p[i].data[k], 2) + QLatin1Char(' ');
+        if (p[i].nbytes > (int)sizeof p[i].data) t += QStringLiteral("…");
+    }
+    if (n == 0) t = QStringLiteral("(no FujiBus packets since the trace was cleared)");
+    setText(m_fujiText, t, force || atEnd(m_fujiText));
+}
+
 void DebuggerWindow::refreshAll()
 {
     refreshStatus(); refreshCpu(); refreshRam(); refreshDisasm(); refreshPpu(); refreshApu();
-    refreshBps(); refreshCart();
+    refreshBps(); refreshCart(); refreshFujinet(false);
 }
 
 void DebuggerWindow::tick()
 {
     if (!isVisible()) return;
+    /* The cartridge's link runs on its own thread, stopped CPU or not. */
+    if (++m_fujiTicks >= 5) {
+        m_fujiTicks = 0;
+        if (m_tabs->currentIndex() == TAB_FUJINET) refreshFujinet(false);
+    }
     const unsigned gen = nesdebug_generation(m_dbg);
     const bool stopped = nesdebug_is_stopped(m_dbg) != 0;
     if (gen != m_seenGen || stopped != m_wasStopped) {

@@ -1,6 +1,7 @@
 /*
  * Debugger window (Qt6 Widgets) over MesenCE's own debugger engine, via
- * core/include/nesdebug.h. Mirrors the GNOME one tab for tab.
+ * core/include/nesdebug.h. Mirrors the GNOME one tab for tab, the FujiNet
+ * tab (every FujiBus packet on the cartridge's link) last.
  *
  * The engine is attached while the window is shown (which stops the
  * machine, as on every sibling) and detached when it is hidden, which lets
@@ -17,6 +18,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
 #include <cstdint>
@@ -51,6 +53,7 @@ private:
     QWidget *buildApu();
     QWidget *buildBreaks();
     QWidget *buildCart();
+    QWidget *buildFujinet();
 
     void refreshAll();
     void refreshStatus();
@@ -61,6 +64,7 @@ private:
     void refreshApu();
     void refreshBps();
     void refreshCart();
+    void refreshFujinet(bool force);
     void tick();
     void runPrompt();
     void appendPrompt(const QString &text);
@@ -72,7 +76,9 @@ private:
     unsigned m_seenGen = 0;
     bool m_wasStopped = false;
     int m_runningTicks = 0;
+    int m_fujiTicks = 0;
     QTimer m_timer;
+    QTabWidget *m_tabs = nullptr;
 
     QLabel *m_status = nullptr;
     QPushButton *m_runBtn = nullptr;
@@ -107,4 +113,9 @@ private:
     bool m_bpFilling = false;
 
     QPlainTextEdit *m_cart = nullptr;
+
+    QPlainTextEdit *m_fujiText = nullptr, *m_fujiState = nullptr;
+    QLabel *m_fujiNote = nullptr;
+    uint64_t m_fujiLast = 0;
+    int m_fujiCount = -1;
 };

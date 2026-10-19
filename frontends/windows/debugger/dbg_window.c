@@ -1,8 +1,8 @@
 /*
  * Debugger window (Win32) over MesenCE's debugger engine, via
  * core/include/nesdebug.h. Mirrors the GTK and Qt debuggers tab for tab --
- * Prompt, CPU & RAM, Disassembly, PPU, APU & Input, Breakpoints, Cart --
- * built from plain common controls.
+ * Prompt, CPU & RAM, Disassembly, PPU, APU & Input, Breakpoints, Cart,
+ * FujiNet -- built from plain common controls.
  *
  * The engine only exists while this window is showing: showing it attaches
  * (which stops the machine, as on every sibling) and hiding it detaches,
@@ -19,6 +19,7 @@
 #include <commdlg.h>
 #include <windowsx.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@
 
 #define DISASM_WINDOW 48
 #define MAX_BPS 128
+#define TRACE_MAX 512
 
 #define WM_DBG_ACCEPT (WM_APP + 2)   /* wp: control id -- Enter in an edit */
 #define WM_DBG_TAB    (WM_APP + 3)   /* Tab in the prompt: complete */
@@ -35,7 +37,7 @@
 
 enum {
     PAGE_PROMPT = 0, PAGE_CPU, PAGE_DISASM, PAGE_PPU, PAGE_APU, PAGE_BREAKS, PAGE_CART,
-    PAGE_COUNT
+    PAGE_FUJINET, PAGE_COUNT
 };
 
 enum {
@@ -51,6 +53,7 @@ enum {
     IDC_BP_LIST, IDC_BP_TYPE, IDC_BP_START, IDC_BP_END, IDC_BP_COND, IDC_BP_ADD,
     IDC_BP_REMOVE, IDC_BP_ENABLE, IDC_BP_CLEAR,
     IDC_CART,
+    IDC_FUJI_NOTE, IDC_FUJI_CLEAR, IDC_FUJI_TEXT, IDC_FUJI_STATE,
     IDC_SAVE_KIND0, IDC_SAVE_KIND_LAST = IDC_SAVE_KIND0 + 4,
     IDC_LABEL_FIRST
 };
@@ -76,7 +79,12 @@ typedef struct {
 
     HWND cart;
 
+    HWND fuji_title, fuji_note, fuji_clear, fuji_text, state_title, fuji_state;
+    uint64_t fuji_last;
+    int fuji_count;
+
     HFONT mono, ui;
+    int mono_h;               /* a line of the monospace font */
     HACCEL accel;
     HBRUSH accent;
 
@@ -87,6 +95,7 @@ typedef struct {
     unsigned seen_gen;
     int was_stopped;
     int running_ticks;
+    int fuji_ticks;
 
     int disasm_top;            /* address of the first disassembly line */
     uint16_t line_addr[DISASM_WINDOW];
@@ -145,6 +154,92 @@ static void append_text_lf(HWND h, const char *text)
 }
 
 static void edit_text(HWND h, char *out, int outsz) { GetWindowTextA(h, out, outsz); }
+
+/* Labels the live refresh rewrites: only on a change, or they flicker. */
+static void set_label(HWND h, const char *text)
+{
+    char cur[256];
+    GetWindowTextA(h, cur, sizeof cur);
+    if (strcmp(cur, text) != 0) SetWindowTextA(h, text);
+}
+
+static size_t addf(char *s, size_t len, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    if (len >= cap) return len;
+    va_start(ap, fmt);
+    n = vsnprintf(s + len, cap - len, fmt, ap);
+    va_end(ap);
+    if (n < 0) return len;
+    return len + (size_t)n < cap ? len + (size_t)n : cap - 1;
+}
+
+/* ---- the FujiNet views: UTF-8 text in Unicode EDIT controls -------------------- */
+
+/* CR LF, control characters dropped, then UTF-16: the packet lines carry
+ * arrows and a multiplication sign. */
+static wchar_t *wide_view_text(const char *text)
+{
+    size_t n = strlen(text), i, o = 0;
+    char *buf = malloc(n * 2 + 1);
+    wchar_t *w = NULL;
+    int wn;
+    if (!buf) return NULL;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == '\n') { buf[o++] = '\r'; buf[o++] = '\n'; }
+        else if (c >= 0x20 || c == '\t') buf[o++] = (char)c;
+    }
+    buf[o] = '\0';
+    wn = MultiByteToWideChar(CP_UTF8, 0, buf, -1, NULL, 0);
+    if (wn > 0 && (w = malloc((size_t)wn * sizeof *w)) != NULL)
+        MultiByteToWideChar(CP_UTF8, 0, buf, -1, w, wn);
+    free(buf);
+    return w;
+}
+
+/* The rows an EDIT view shows. */
+static int edit_rows(debugger *d, HWND h)
+{
+    RECT c;
+    GetClientRect(h, &c);
+    return d->mono_h > 0 && c.bottom > d->mono_h ? c.bottom / d->mono_h : 1;
+}
+
+/* Logs follow their end while their reader is there. */
+static int edit_at_end(debugger *d, HWND h)
+{
+    const int first = (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0);
+    const int count = (int)SendMessageW(h, EM_GETLINECOUNT, 0, 0);
+    return first + edit_rows(d, h) >= count;
+}
+
+static void edit_to_end(HWND h)
+{
+    SendMessageW(h, EM_LINESCROLL, 0, SendMessageW(h, EM_GETLINECOUNT, 0, 0));
+}
+
+static void edit_scroll_to(HWND h, int first)
+{
+    SendMessageW(h, EM_LINESCROLL, 0, first - (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0));
+}
+
+/* Replaces a view's text where the reader left it (a refresh must not throw
+ * a scrolled view back to its top), or, following, at its end. */
+static void set_text_at(HWND h, const char *text, int follow)
+{
+    const int first = (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0);
+    wchar_t *w = wide_view_text(text);
+    if (!w) return;
+    SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(h, w);
+    if (follow) edit_to_end(h);
+    else edit_scroll_to(h, first);
+    SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(h, NULL, TRUE);
+    free(w);
+}
 
 /* $hex, 0xhex, #dec, or bare hex, as the prompt reads numbers. */
 static int parse_num(const char *text, long *out)
@@ -474,6 +569,44 @@ static void refresh_cart(debugger *d)
     set_text_lf(d->cart, s);
 }
 
+/* The note and the link's state always; the log only when it changed. */
+static void refresh_fujinet(debugger *d, int force)
+{
+    static nesdebug_fuji_packet p[TRACE_MAX];
+    static char t[TRACE_MAX * 320 + 128];
+    static char state[2048];
+    size_t len = 0;
+    int n = nesdebug_fujinet_trace(d->dbg, p, TRACE_MAX), i, follow;
+
+    if (!nessession_is_running(d->session))
+        set_label(d->fuji_note, "The NES is off.");
+    else if (!nessession_fujinet_running(d->session))
+        set_label(d->fuji_note, "FujiNet is off (Machine > Settings > Enable FujiNet).");
+    else
+        set_label(d->fuji_note, nessession_cart_link_up(d->session) == 1
+                                    ? "FujiNet is on; the cartridge is connected."
+                                    : "FujiNet is on; the cartridge is not connected.");
+    state[0] = '\0';
+    nesdebug_fujinet_state(d->dbg, state, sizeof state);
+    set_text_at(d->fuji_state, state, 0);
+    if (n < 0) n = 0;
+
+    if (!force && n == d->fuji_count && (n == 0 || p[n - 1].serial == d->fuji_last)) return;
+    follow = force || d->fuji_count < 0 || edit_at_end(d, d->fuji_text);
+    d->fuji_count = n;
+    d->fuji_last = n > 0 ? p[n - 1].serial : 0;
+    t[0] = '\0';
+    for (i = 0; i < n; i++) {
+        int k;
+        len = addf(t, len, sizeof t, "%s%s\n     ", i ? "\n" : "", p[i].text);
+        for (k = 0; k < p[i].nbytes && k < (int)sizeof p[i].data; k++)
+            len = addf(t, len, sizeof t, "%02X ", p[i].data[k]);
+        if (p[i].nbytes > (int)sizeof p[i].data) len = addf(t, len, sizeof t, "\xe2\x80\xa6");
+    }
+    if (n == 0) len = addf(t, len, sizeof t, "(no FujiBus packets since the trace was cleared)");
+    set_text_at(d->fuji_text, t, follow);
+}
+
 static void refresh_all(debugger *d)
 {
     refresh_status(d);
@@ -484,6 +617,7 @@ static void refresh_all(debugger *d)
     refresh_apu(d);
     refresh_bps(d);
     refresh_cart(d);
+    refresh_fujinet(d, 0);
 }
 
 /* ---- actions ------------------------------------------------------------------ */
@@ -774,6 +908,18 @@ static HWND mono_view(debugger *d, int id, int wrap)
                  id, d->mono);
 }
 
+/* A read-only view that takes Unicode text (set_text_at). */
+static HWND wide_view(debugger *d, int id)
+{
+    HWND h = CreateWindowExW(0, L"EDIT", L"",
+                             WS_CHILD | WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                             0, 0, 10, 10, d->hwnd, (HMENU)(INT_PTR)id,
+                             (HINSTANCE)GetWindowLongPtrA(d->hwnd, GWLP_HINSTANCE), NULL);
+    SendMessageW(h, WM_SETFONT, (WPARAM)d->mono, TRUE);
+    SendMessageW(h, EM_SETLIMITTEXT, 0, 0);
+    return h;
+}
+
 static HWND field(debugger *d, int id, HFONT font)
 {
     HWND h = child(d, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, id, font);
@@ -810,7 +956,7 @@ static void build_controls(debugger *d)
 {
     TCITEMA item;
     static const char *const tabs[PAGE_COUNT] = { "Prompt", "CPU && RAM", "Disassembly", "PPU",
-                                                  "APU && Input", "Breakpoints", "Cart" };
+                                                  "APU && Input", "Breakpoints", "Cart", "FujiNet" };
     static const char *const reg_names[6] = { "PC", "SP", "A", "X", "Y", "P" };
     static const char *const flag_names[6] = { "N", "V", "D", "I", "Z", "C" };
     static const char *const views[4] = { "Nametables", "Patterns", "Sprites", "Palette" };
@@ -903,6 +1049,19 @@ static void build_controls(debugger *d)
 
     /* Cart */
     d->cart = mono_view(d, IDC_CART, 1);
+
+    /* FujiNet */
+    d->fuji_title = label(d, "FujiBus packets (SLIP-decoded)");
+    d->fuji_note = child(d, "STATIC", "", SS_LEFT | SS_ENDELLIPSIS, IDC_FUJI_NOTE, d->ui);
+    d->fuji_clear = button(d, "Clear", IDC_FUJI_CLEAR);
+    d->fuji_text = wide_view(d, IDC_FUJI_TEXT);
+    d->state_title = label(d, "The cartridge's link");
+    d->fuji_state = wide_view(d, IDC_FUJI_STATE);
+    d->fuji_count = -1;
+
+    /* The tab control under every page's controls: with WS_CLIPSIBLINGS it
+     * then never paints its body over a label that has not repainted. */
+    SetWindowPos(d->tabs, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 static void show_page(debugger *d, int page)
@@ -913,6 +1072,7 @@ static void show_page(debugger *d, int page)
     HWND ppu[] = { d->ppu_text, d->ppu_view_label, d->ppu_view, d->ppu_pal_label, d->ppu_palette, d->ppu_pic, d->oam };
     HWND brk[] = { d->bp_list, d->bp_type, d->bp_start_label, d->bp_start, d->bp_end_label, d->bp_end,
                    d->bp_cond_label, d->bp_cond, d->bp_add, d->bp_remove, d->bp_enable, d->bp_clear };
+    HWND fuji[] = { d->fuji_title, d->fuji_note, d->fuji_clear, d->fuji_text, d->state_title, d->fuji_state };
     size_t i;
     d->page = page;
 #define SHOW(arr, p) for (i = 0; i < sizeof(arr) / sizeof((arr)[0]); i++) ShowWindow((arr)[i], page == (p) ? SW_SHOW : SW_HIDE)
@@ -928,6 +1088,7 @@ static void show_page(debugger *d, int page)
     ShowWindow(d->apu, page == PAGE_APU ? SW_SHOW : SW_HIDE);
     SHOW(brk, PAGE_BREAKS);
     ShowWindow(d->cart, page == PAGE_CART ? SW_SHOW : SW_HIDE);
+    SHOW(fuji, PAGE_FUJINET);
 #undef SHOW
 }
 
@@ -1024,6 +1185,18 @@ static void layout(debugger *d)
 
     /* Cart */
     MoveWindow(d->cart, px, py, pw, ph, TRUE);
+
+    /* FujiNet: the packets left (a note and Clear over them), the link right */
+    {
+        const int rw = pw / 3 > 320 ? 320 : pw / 3 > 220 ? pw / 3 : 220;
+        const int lw = pw - rw - 12;
+        MoveWindow(d->fuji_title, px, py + 2, lw, 18, TRUE);
+        MoveWindow(d->fuji_note, px, py + 28, lw - 80, 18, TRUE);
+        MoveWindow(d->fuji_clear, px + lw - 72, py + 24, 72, 26, TRUE);
+        MoveWindow(d->fuji_text, px, py + 56, lw, ph - 56, TRUE);
+        MoveWindow(d->state_title, px + lw + 12, py + 2, rw, 18, TRUE);
+        MoveWindow(d->fuji_state, px + lw + 12, py + 24, rw, ph - 24, TRUE);
+    }
 }
 
 /* ---- attach / detach -------------------------------------------------------------- */
@@ -1081,6 +1254,11 @@ static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == TIMER_REFRESH && IsWindowVisible(hwnd)) {
             const unsigned gen = nesdebug_generation(d->dbg);
             const int stopped = nesdebug_is_stopped(d->dbg);
+            /* The cartridge's link runs on its own thread, stopped CPU or not. */
+            if (++d->fuji_ticks >= 5) {
+                d->fuji_ticks = 0;
+                if (d->page == PAGE_FUJINET) refresh_fujinet(d, 0);
+            }
             if (gen != d->seen_gen || stopped != d->was_stopped) {
                 d->seen_gen = gen;
                 d->was_stopped = stopped;
@@ -1106,6 +1284,7 @@ static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (((LPNMHDR)lp)->code == (UINT)TCN_SELCHANGE) {
             show_page(d, (int)SendMessageA(d->tabs, TCM_GETCURSEL, 0, 0));
             layout(d);
+            if (d->page == PAGE_FUJINET) refresh_fujinet(d, 0);
             return 0;
         }
         break;
@@ -1113,7 +1292,8 @@ static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == IDC_RUN) { draw_run_button(d, (const DRAWITEMSTRUCT *)lp); return TRUE; }
         break;
     case WM_CTLCOLORSTATIC:
-        if ((HWND)lp == d->status || (HWND)lp == d->cycles || (HWND)lp == d->disasm_hint) {
+        if ((HWND)lp == d->status || (HWND)lp == d->cycles || (HWND)lp == d->disasm_hint ||
+            (HWND)lp == d->fuji_note) {
             SetTextColor((HDC)wp, GetSysColor(COLOR_GRAYTEXT));
             SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
             return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
@@ -1173,6 +1353,10 @@ static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             nesdebug_breakpoint_clear(d->dbg);
             refresh_bps(d);
             refresh_disasm(d);
+            return 0;
+        case IDC_FUJI_CLEAR:
+            nesdebug_fujinet_trace_clear(d->dbg);
+            refresh_fujinet(d, 1);
             return 0;
         case IDCANCEL:
             detach_and_hide(d);
@@ -1254,6 +1438,16 @@ void nes_debugger_show(HWND parent, nessession *session)
                           CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
     d->accent = CreateSolidBrush(RGB((NESSESSION_ACCENT_RGB >> 16) & 0xff, (NESSESSION_ACCENT_RGB >> 8) & 0xff,
                                      NESSESSION_ACCENT_RGB & 0xff));
+    {
+        /* the monospace line, for following a log's end */
+        HDC dc = GetDC(d->hwnd);
+        HGDIOBJ prev = SelectObject(dc, d->mono);
+        TEXTMETRICA tm;
+        d->mono_h = 15;
+        if (GetTextMetricsA(dc, &tm)) d->mono_h = tm.tmHeight;
+        SelectObject(dc, prev);
+        ReleaseDC(d->hwnd, dc);
+    }
 
     build_controls(d);
 

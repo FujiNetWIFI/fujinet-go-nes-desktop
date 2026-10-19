@@ -33,6 +33,7 @@ extern "C" {
 void nesdebug_note_stop(nessession* s, const char* msg, int addr);
 void nesdebug_note_resume(nessession* s);
 void nesdebug_destroy(nessession* s);
+void nesdebug_trace_install(nessession* s);
 void nesdebug_before_load(nessession* s);
 void nesdebug_after_load(nessession* s);
 
@@ -237,6 +238,8 @@ extern "C" int nessession_start(nessession* s, const nessession_start_opts* opts
   };
   cb.onResumed = [s] { nesdebug_note_resume(s); };
   host_of(s)->SetCallbacks(cb);
+  // Before the cartridge's first dial-in, so the trace sees it all.
+  nesdebug_trace_install(s);
 
   std::string err;
   if(!host_of(s)->Start(cfg, err))

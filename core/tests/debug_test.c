@@ -180,6 +180,16 @@ int main(void)
         check(nesdebug_cart_info(d, out, sizeof out) > 0 && strstr(out, "mapper 0"), "cart info line");
     }
 
+    /* the FujiNet tab: no FujiNet here, but the state and the trace answer */
+    {
+        static nesdebug_fuji_packet pk[16];
+        check(nesdebug_fujinet_state(d, out, sizeof out) > 0 && strstr(out, "Link") && strstr(out, "Packets"),
+              "FujiNet state text");
+        check(nesdebug_fujinet_trace(d, pk, 16) >= 0, "the FujiNet trace answers");
+        nesdebug_fujinet_trace_clear(d);
+        check(nesdebug_fujinet_trace(d, pk, 16) == 0, "and clears");
+    }
+
     /* the prompt */
     nesdebug_command(d, "print a", out, sizeof out);
     check(strstr(out, "66") != NULL, "print evaluates a Mesen expression");

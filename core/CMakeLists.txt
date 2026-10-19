@@ -107,7 +107,8 @@ set(NES_SESSION_C_SOURCES
   src/hid_keys.c)
 set(NES_SESSION_CXX_SOURCES
   src/session.cpp
-  src/debug.cpp)
+  src/debug.cpp
+  src/fuji_trace.cpp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/gamepad_sdl.c")
   list(APPEND NES_SESSION_C_SOURCES src/gamepad_sdl.c)
 else()

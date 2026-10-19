@@ -45,8 +45,10 @@ desktop app. A member of the FujiNet Go desktop family
   `labels`, `runto`, `disasm`, `cart` … with Tab completion), CPU & RAM
   (editable), Disassembly (click to toggle a breakpoint, follow PC, jump to a
   label), PPU (registers, nametables with the scroll window, pattern tables,
-  sprites, palette, OAM), APU & Input, Breakpoints, and Cart (link, mailbox,
-  load progress, mapper, PRG/CHR slots, IRQ). The engine is MesenCE's own;
+  sprites, palette, OAM), APU & Input, Breakpoints, Cart (link, mailbox,
+  load progress, mapper, PRG/CHR slots, IRQ), and FujiNet (every FujiBus
+  packet on the cartridge's link since the session started, both ways, with
+  hex; a repeated exchange counts ×N). The engine is MesenCE's own;
   it loads ld65 (`-Ln`/VICE), ca65 `.dbg` and Mesen `.mlb` symbols, and the
   NES registers and the FujiNet mailbox are labelled out of the box.
 - **Gamepads that come and go.** SDL3 hot-plug: a pad plugged in while a game
@@ -166,9 +168,11 @@ Every control is remappable in the Controllers window.
   debugger contract (attach stops, step/over/out, disassembly with the PC
   line, execute and write breakpoints that hit and survive a power cycle,
   memory edits that reach RAM and the PRG SRAM, the PPU views, the prompt),
-  the FujiNet link (`fujibus_smoke`), and a full network boot (`netboot`:
-  MOUNT_HOST, SET_DEVICE_FULLPATH, MOUNT_IMAGE, the DBC push, the loader's
-  32 slices, the new image running) against the in-process FujiNet.
+  the FujiNet tab's packet decoder (`fujitrace`, synthetic bytes), the
+  FujiNet link and its trace (`fujibus_smoke`), and a full network boot
+  (`netboot`: MOUNT_HOST, SET_DEVICE_FULLPATH, MOUNT_IMAGE, the DBC push,
+  the loader's 32 slices, the new image running) against the in-process
+  FujiNet.
   `keyboard` runs a ROM that scans the Family BASIC and Subor matrices the
   way their software does and checks that host keys and on-screen clicks
   land on exactly the right row and bit, that Scroll Lock hands the keys

@@ -8,6 +8,9 @@
  * breakpoints and loaded labels live here, so they survive a detach, a
  * power cycle (which replaces the console and its debugger) and a reattach.
  *
+ * The FujiNet trace is the exception to "only while attached": the
+ * cartridge's link feeds it from the session's start (fuji_trace.h).
+ *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -49,6 +52,8 @@ extern "C" {
 #include "nesdebug.h"
 }
 
+#include "fuji_trace.h"
+
 MesenHost* nessession_host(nessession* s);
 
 namespace {
@@ -80,6 +85,7 @@ struct nesdebug
   std::atomic<unsigned> generation{0};
   std::atomic<unsigned> stops{0};      // CodeBreak notifications seen
   std::atomic<bool> attached{false};
+  FujiTrace fuji;                // locks itself
   std::mutex mutex;              // guards everything below
   std::string reason;
   int reasonAddr{-1};
@@ -294,11 +300,37 @@ extern "C" nesdebug* nesdebug_get(nessession* s)
   return static_cast<nesdebug*>(s->debugger);
 }
 
+namespace {
+
+nesdebug* gTraced = nullptr;     // the debugger the cartridge's link feeds
+
+// On the cartridge's worker thread: every frame on its link.
+void fuji_trace_hook(void* user, int dir, const uint8_t* raw, size_t len)
+{
+  static_cast<nesdebug*>(user)->fuji.Feed(dir, raw, len);
+}
+
+} // namespace
+
 void nesdebug_destroy(nessession* s)
 {
   if(!s || !s->debugger) return;
-  delete static_cast<nesdebug*>(s->debugger);
+  auto* d = static_cast<nesdebug*>(s->debugger);
+  if(gTraced == d)
+  {
+    FujiNetCart::SetTrace(nullptr, nullptr);
+    gTraced = nullptr;
+  }
+  delete d;
   s->debugger = nullptr;
+}
+
+// The FujiNet trace is always on: it is cheap, and it is most useful about
+// what happened before anyone thought to look.
+void nesdebug_trace_install(nessession* s)
+{
+  gTraced = nesdebug_get(s);
+  FujiNetCart::SetTrace(fuji_trace_hook, gTraced);
 }
 
 // Called on the emulation thread from the CodeBreak notification.
@@ -1129,6 +1161,41 @@ extern "C" int nesdebug_cart_info(nesdebug* d, char* dst, int dstsz)
     s += ", mapper " + std::to_string(c.mapper) + (c.mapper_name[0] ? std::string(" (") + c.mapper_name + ")" : "");
   s += c.link_up ? ", link up" : ", link down";
   if(!c.mailbox_live) s += ", mailbox closed";
+  return put(dst, dstsz, s);
+}
+
+// ---- FujiNet -----------------------------------------------------------------
+
+extern "C" int nesdebug_fujinet_trace(nesdebug* d, nesdebug_fuji_packet* out, int max)
+{
+  return d ? d->fuji.Copy(out, max) : 0;
+}
+
+extern "C" void nesdebug_fujinet_trace_clear(nesdebug* d)
+{
+  if(d) d->fuji.Clear();
+}
+
+extern "C" int nesdebug_fujinet_state(nesdebug* d, char* dst, int dstsz)
+{
+  if(!d) return put(dst, dstsz, "");
+  if(!d->session->running) return put(dst, dstsz, "The NES is off.\n");
+  nesdebug_cart c;
+  nesdebug_cart_get(d, &c);
+  if(!c.present) return put(dst, dstsz, "The cartridge is starting.\n");
+  const FujiNetCartHostConfig cfg = FujiNetCart::GetHostConfig();
+  std::string s = "Link          " + std::string(c.link_up ? "up" : "down") +
+                  (c.busy ? " (transaction in flight)" : "") + "\n";
+  s += "Dials         " + cfg.Host + ":" + std::to_string(cfg.Port) + " (BoIP)\n";
+  if(c.link_error[0]) s += std::string("Link error    ") + c.link_error + "\n";
+  s += std::string("Mailbox       ") + (c.mailbox_live ? "live" : "closed") + "\n";
+  s += "ACKSEQ        $" + hex(c.ackseq, 2) + "\n";
+  s += "STATUS        $" + hex(c.status, 2) + "\n";
+  s += "Last error    " + std::to_string(c.last_error) + "\n";
+  s += "Queue         " + std::to_string(c.queue_depth) + " waiting\n";
+  s += std::string("Image         ") + (c.booted_image ? "a booted game" : "CONFIG");
+  if(c.loading) s += ", loading " + std::to_string(c.load_pct) + "%";
+  s += "\n\nPackets       " + std::to_string(d->fuji.Total()) + " since the start\n";
   return put(dst, dstsz, s);
 }
 

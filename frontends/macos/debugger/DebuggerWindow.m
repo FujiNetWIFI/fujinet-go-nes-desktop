@@ -2,7 +2,7 @@
  * Debugger window (AppKit) over MesenCE's own debugger engine, via
  * core/include/nesdebug.h. Mirrors the GTK, Qt and Win32 debuggers tab
  * for tab: Prompt, CPU & RAM, Disassembly, PPU, APU & Input, Breakpoints,
- * Cart.
+ * Cart, FujiNet.
  *
  * Opening the window attaches the engine, which stops the machine; closing
  * it detaches, and the machine runs on.
@@ -22,6 +22,8 @@
 
 #define DISASM_WINDOW 48
 #define MAX_BPS 64
+#define TRACE_MAX 512
+#define TAB_FUJINET 7      /* the last tab */
 
 static NESDebuggerWindow *g_debugger;
 
@@ -80,9 +82,10 @@ static NESDebuggerWindow *g_debugger;
 }
 @end
 
-@interface NESDebuggerWindow ()
+@interface NESDebuggerWindow () <NSTabViewDelegate>
 - (instancetype)initWithSession:(nessession *)session;
 - (void)refreshAll;
+- (void)refreshFujinet:(BOOL)force;
 @end
 
 @implementation NESDebuggerWindow {
@@ -93,6 +96,7 @@ static NESDebuggerWindow *g_debugger;
     unsigned _seenGen;
     BOOL _wasStopped;
     int _runningTicks;
+    int _fujiTicks;
     NSTabView *_tabs;
 
     NSButton *_runBtn;
@@ -128,6 +132,11 @@ static NESDebuggerWindow *g_debugger;
     NSStackView *_bpList;
 
     NSTextView *_cart;
+
+    NSTextView *_fujiText, *_fujiState;
+    NSTextField *_fujiNote;
+    uint64_t _fujiLast;
+    int _fujiCount;
 }
 
 static const char *const kFileKinds[5] = { "dis", "prg", "chr", "ram", "wram" };
@@ -242,6 +251,30 @@ static void fill(NSStackView *stack, NSView *view)
     [view.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
 }
 
+/* Whether a view's reader is at its end (a log then follows new lines). */
+static BOOL atEnd(NSTextView *view)
+{
+    NSScrollView *scroll = view.enclosingScrollView;
+    if (!scroll) return YES;
+    return NSMaxY(scroll.contentView.documentVisibleRect) >= NSHeight(view.frame) - 4;
+}
+
+/* Replaces a view's text where the reader left it (a refresh must not throw
+ * a scrolled view back to its top), or, following, at its end. */
+static void setText(NSTextView *view, NSString *text, BOOL follow)
+{
+    if (![view.string isEqualToString:text]) {
+        NSScrollView *scroll = view.enclosingScrollView;
+        const NSPoint at = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+        view.string = text;
+        if (scroll && !follow) {
+            [scroll.contentView scrollToPoint:at];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
+    }
+    if (follow) [view scrollRangeToVisible:NSMakeRange(view.string.length, 0)];
+}
+
 /* ---- lifetime -------------------------------------------------------------- */
 
 + (void)showForSession:(nessession *)session
@@ -307,6 +340,16 @@ static void fill(NSStackView *stack, NSView *view)
         [self refreshApu];
         [self refreshCart];
     }
+    /* The cartridge's link runs on its own thread, stopped CPU or not. */
+    if (++_fujiTicks >= 5) {
+        _fujiTicks = 0;
+        if ([_tabs indexOfTabViewItem:_tabs.selectedTabViewItem] == TAB_FUJINET) [self refreshFujinet:NO];
+    }
+}
+
+- (void)tabView:(NSTabView *)tabView didSelectTabViewItem:(NSTabViewItem *)item
+{
+    if ([tabView indexOfTabViewItem:item] == TAB_FUJINET) [self refreshFujinet:NO];
 }
 
 /* ---- construction ------------------------------------------------------------ */
@@ -494,6 +537,44 @@ static void fill(NSStackView *stack, NSView *view)
     return scroll;
 }
 
+- (NSView *)buildFujinet
+{
+    NSTextField *title = [self label:@"FujiBus packets (SLIP-decoded)"];
+    title.font = [NSFont boldSystemFontOfSize:[NSFont systemFontSize]];
+    _fujiNote = [self label:@""];
+    _fujiNote.textColor = NSColor.secondaryLabelColor;
+    _fujiNote.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_fujiNote setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_fujiNote setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView *row = hstack(@[_fujiNote, [self button:@"Clear" action:@selector(fujiClear:)]]);
+    NSScrollView *fujiScroll, *stateScroll;
+    _fujiText = monoView(&fujiScroll, NO);
+    _fujiState = monoView(&stateScroll, NO);
+    NSStackView *left = vstack(@[title, row, fujiScroll]);
+    fill(left, row);
+    fill(left, fujiScroll);
+    [fujiScroll setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                           forOrientation:NSLayoutConstraintOrientationVertical];
+
+    NSTextField *stateTitle = [self label:@"The cartridge's link"];
+    stateTitle.font = [NSFont boldSystemFontOfSize:[NSFont systemFontSize]];
+    NSStackView *right = vstack(@[stateTitle, stateScroll]);
+    fill(right, stateScroll);
+    [stateScroll setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                            forOrientation:NSLayoutConstraintOrientationVertical];
+
+    NSStackView *h = hstack(@[left, right]);
+    h.alignment = NSLayoutAttributeTop;
+    h.spacing = 12;
+    [left.widthAnchor constraintGreaterThanOrEqualToConstant:520].active = YES;
+    [right.widthAnchor constraintEqualToConstant:320].active = YES;
+    [left.heightAnchor constraintEqualToAnchor:h.heightAnchor].active = YES;
+    [right.heightAnchor constraintEqualToAnchor:h.heightAnchor].active = YES;
+    _fujiCount = -1;
+    return h;
+}
+
 - (void)buildWindow
 {
     _window = [[NSWindow alloc]
@@ -532,7 +613,7 @@ static void fill(NSStackView *stack, NSView *view)
     NSArray *pages = @[ @[@"Prompt", [self buildPrompt]], @[@"CPU & RAM", [self buildCpu]],
                         @[@"Disassembly", [self buildDisasm]], @[@"PPU", [self buildPpu]],
                         @[@"APU & Input", [self buildApu]], @[@"Breakpoints", [self buildBreaks]],
-                        @[@"Cart", [self buildCart]] ];
+                        @[@"Cart", [self buildCart]], @[@"FujiNet", [self buildFujinet]] ];
     for (NSArray *page in pages) {
         NSTabViewItem *item = [NSTabViewItem tabViewItemWithViewController:nil];
         item.label = page[0];
@@ -552,6 +633,7 @@ static void fill(NSStackView *stack, NSView *view)
         const int t = atoi(tab);
         if (t >= 0 && t < (int)_tabs.numberOfTabViewItems) [_tabs selectTabViewItemAtIndex:t];
     }
+    _tabs.delegate = self;
 
     NSStackView *root = vstack(@[toolbar, _tabs]);
     root.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
@@ -929,6 +1011,46 @@ static void fill(NSStackView *stack, NSView *view)
     _cart.string = s;
 }
 
+/* The note and the link's state always; the log only when it changed. */
+- (void)refreshFujinet:(BOOL)force
+{
+    static nesdebug_fuji_packet p[TRACE_MAX];
+    static char state[2048];
+    int n = nesdebug_fujinet_trace(_dbg, p, TRACE_MAX);
+    if (n < 0) n = 0;
+    if (!nessession_is_running(_session))
+        _fujiNote.stringValue = @"The NES is off.";
+    else if (!nessession_fujinet_running(_session))
+        _fujiNote.stringValue = @"FujiNet is off (Settings ▸ Enable FujiNet).";
+    else
+        _fujiNote.stringValue = nessession_cart_link_up(_session) == 1
+                                    ? @"FujiNet is on; the cartridge is connected."
+                                    : @"FujiNet is on; the cartridge is not connected.";
+    state[0] = '\0';
+    nesdebug_fujinet_state(_dbg, state, (int)sizeof state);
+    setText(_fujiState, [NSString stringWithUTF8String:state] ?: @"", NO);
+
+    if (!force && n == _fujiCount && (n == 0 || p[n - 1].serial == _fujiLast)) return;
+    _fujiCount = n;
+    _fujiLast = n > 0 ? p[n - 1].serial : 0;
+    const BOOL follow = force || atEnd(_fujiText);
+    NSMutableString *t = [NSMutableString string];
+    for (int i = 0; i < n; i++) {
+        [t appendFormat:@"%@%@\n     ", i ? @"\n" : @"", [NSString stringWithUTF8String:p[i].text] ?: @""];
+        for (int k = 0; k < p[i].nbytes && k < (int)sizeof p[i].data; k++) [t appendFormat:@"%02X ", p[i].data[k]];
+        if (p[i].nbytes > (int)sizeof p[i].data) [t appendString:@"…"];
+    }
+    if (n == 0) [t appendString:@"(no FujiBus packets since the trace was cleared)"];
+    setText(_fujiText, t, follow);
+}
+
+- (void)fujiClear:(id)sender
+{
+    (void)sender;
+    nesdebug_fujinet_trace_clear(_dbg);
+    [self refreshFujinet:YES];
+}
+
 - (void)refreshAll
 {
     [self refreshStatus];
@@ -939,5 +1061,6 @@ static void fill(NSStackView *stack, NSView *view)
     [self refreshApu];
     [self refreshBps];
     [self refreshCart];
+    [self refreshFujinet:NO];
 }
 @end

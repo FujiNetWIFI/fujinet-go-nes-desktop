@@ -3,7 +3,8 @@
  * port, the CONFIG client boots, and the cartridge's link comes up. This is
  * the one test that proves the whole chain -- the MesenCE fork's FujiNetCart
  * and FujiNetLink, the RS232 PC runtime's BoIP listener, the port numbers and
- * the start ordering -- rather than any one piece.
+ * the start ordering -- rather than any one piece. The debugger's FujiNet
+ * trace, fed by the link from the session's start, must have seen both ways.
  *
  * SKIPs (77) when no runtime library is available.
  *
@@ -16,6 +17,7 @@
 #include <time.h>
 
 #include "nessession.h"
+#include "nesdebug.h"
 #include "test_tmpdir.h"
 
 static int failures;
@@ -76,6 +78,18 @@ int main(void)
     check(strstr(logbuf, "BoIP") != NULL || strstr(logbuf, "connected") != NULL || logbuf[0] != '\0',
           "the FujiNet console log has content");
     check(nessession_cart_booted_game(s) == 0, "nothing has been booted yet");
+    {
+        static nesdebug_fuji_packet pk[512];
+        const int n = nesdebug_fujinet_trace(nessession_debugger(s), pk, 512);
+        int req = 0, rep = 0, i;
+        for (i = 0; i < n; i++) {
+            if (pk[i].to_host) rep++; else req++;
+        }
+        printf("FujiNet trace: %d packets, %d to FujiNet, %d back%s%s\n", n, req, rep,
+               n > 0 ? "; first: " : "", n > 0 ? pk[0].text : "");
+        check(req > 0, "the trace saw a request to FujiNet");
+        check(rep > 0, "and a reply from it");
+    }
 
     /* reboot: the old link must die before the new one dials in (backlog 1) */
     check(nessession_reset_to_config(s) == 0, "reset to CONFIG");

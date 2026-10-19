@@ -3,6 +3,15 @@
 # MesenCE fork's FujiNet cartridge embeds it), or a tiny NROM image the test
 # writes itself (test_rom.h), so nothing here ever skips for want of a ROM.
 
+# The FujiNet tab's packet decoder, pure: synthetic SLIP bytes both ways,
+# split reads, repeats folding into xN, the ring's cap. Needs nothing but
+# its own source, so it builds and runs everywhere.
+add_executable(fujitrace_test fujitrace_test.cpp ../src/fuji_trace.cpp)
+target_include_directories(fujitrace_test PRIVATE
+  "${CMAKE_SOURCE_DIR}/core/include" "${CMAKE_SOURCE_DIR}/core/src")
+set_target_properties(fujitrace_test PROPERTIES CXX_STANDARD 17)
+add_test(NAME fujitrace COMMAND fujitrace_test)
+
 # These need the session layer, which needs SDL3. On a build without it
 # (a cross-toolchain, or a lean machine) only the core libraries build.
 if(TARGET nes_session)
@@ -35,8 +44,9 @@ target_link_libraries(media_test PRIVATE nes_session)
 add_test(NAME media COMMAND media_test)
 
 # The real in-process FujiNet: brings libfujinet up on its port, boots the
-# CONFIG client and confirms the cartridge's link came up and a transaction
-# completed. SKIPs (77) when the runtime was not built (-DWITH_FUJINET=OFF).
+# CONFIG client and confirms the cartridge's link came up, a transaction
+# completed and the debugger's FujiNet trace saw a request and a reply.
+# SKIPs (77) when the runtime was not built (-DWITH_FUJINET=OFF).
 # Serial: it owns the port.
 add_executable(fujibus_smoke fujibus_smoke.c)
 target_link_libraries(fujibus_smoke PRIVATE nes_session)
@@ -60,7 +70,7 @@ add_test(NAME gamepad COMMAND gamepad_test)
 
 # The debugger contract: attach stops the machine, registers, step / over /
 # out, disassembly with the PC line, breakpoints that hit, memory, the PPU
-# views, the cartridge tab, the prompt, detach resumes.
+# views, the cartridge and FujiNet tabs, the prompt, detach resumes.
 add_executable(debug_test debug_test.c)
 target_link_libraries(debug_test PRIVATE nes_session)
 add_test(NAME debug COMMAND debug_test)
