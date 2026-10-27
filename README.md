@@ -207,10 +207,10 @@ publishes what it produced as a **draft** release:
 
 The version is declared in the tree (`project(… VERSION …)` and both
 metainfo files, which template it), not derived from the tag; `check-version`
-stops the release if they disagree. To release 0.2.0: set the version in
+stops the release if they disagree. To release 0.2.1: set the version in
 `CMakeLists.txt`, add a `<release>` entry with its date to both
 `frontends/*/data/*.metainfo.xml.in`, commit, then
-`git tag -a v0.2.0 && git push origin v0.2.0`.
+`git tag -a v0.2.1 && git push origin v0.2.1`.
 
 The Windows release build is native MSYS2/UCRT64, and the `release.yml` job
 checks the exe's and `fujinet.dll`'s import tables against a system-DLL

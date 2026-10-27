@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=FujiNet Go NES
+Name=FujiNet Go NES (KDE)
 GenericName=NES Emulator
 Comment=An NES with a built-in FujiNet
 Exec=fujinet-go-nes-kde %f
