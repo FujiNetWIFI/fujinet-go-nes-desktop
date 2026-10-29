@@ -161,6 +161,34 @@ static GtkWidget *switch_row(PrefsState *state, const char *title,
     return row;
 }
 
+#define EXTERNAL_PLACEHOLDER "127.0.0.1:11506"
+
+/* The address field: valid text (or none, meaning 127.0.0.1:11506) is saved
+ * and marks the session dirty; anything else is flagged and not saved. */
+static void addr_changed(GtkEditable *entry, gpointer user_data)
+{
+    PrefsState *state = user_data;
+    const char *text = gtk_editable_get_text(entry);
+    char host[64];
+    int port;
+
+    if (nessession_parse_hostport(text, host, sizeof host, &port) != 0) {
+        gtk_widget_add_css_class(GTK_WIDGET(entry), "error");
+        return;
+    }
+    gtk_widget_remove_css_class(GTK_WIDGET(entry), "error");
+    if (g_strcmp0(nessession_get_str(state->session, "fujinet_external_addr", ""), text) == 0)
+        return;
+    nessession_set_str(state->session, "fujinet_external_addr", text);
+    state->dirty = TRUE;
+}
+
+static void external_toggled(GObject *row, GParamSpec *pspec, gpointer user_data)
+{
+    gtk_widget_set_sensitive(GTK_WIDGET(user_data), adw_switch_row_get_active(ADW_SWITCH_ROW(row)));
+    (void)pspec;
+}
+
 /* ---- gamepads: one row per pad, with its port assignment ------------------- */
 
 static void pad_assign_changed(GObject *row, GParamSpec *pspec, gpointer user_data)
@@ -316,6 +344,22 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
                    "Run the in-process FujiNet the cartridge dials into. Off "
                    "means no network and a link-down CONFIG.",
                    "enable_fujinet", 1, 0));
+    {
+        GtkWidget *external = switch_row(state, "Use external FujiNet",
+            "Skip the built-in FujiNet and connect to another instance: its "
+            "[BOIP] listener's host and port.",
+            "fujinet_external", 0, 0);
+        GtkWidget *addr = adw_entry_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(addr),
+                                      "Address:port, e.g. " EXTERNAL_PLACEHOLDER);
+        gtk_editable_set_text(GTK_EDITABLE(addr),
+                              nessession_get_str(session, "fujinet_external_addr", ""));
+        g_signal_connect(addr, "changed", G_CALLBACK(addr_changed), state);
+        gtk_widget_set_sensitive(addr, adw_switch_row_get_active(ADW_SWITCH_ROW(external)));
+        g_signal_connect(external, "notify::active", G_CALLBACK(external_toggled), addr);
+        adw_preferences_group_add(host, external);
+        adw_preferences_group_add(host, addr);
+    }
     adw_preferences_group_add(host,
         switch_row(state, "Audio", "Open the system audio device", "enable_audio", 1, 0));
     adw_preferences_group_add(host,

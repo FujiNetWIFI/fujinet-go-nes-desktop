@@ -103,13 +103,17 @@ typedef struct {
     int analog_joystick;      /* gamepad sticks drive the D-pad too */
     int keyboard;             /* nes_keyboard on the expansion port */
     int enable_fujinet;       /* start the in-process FujiNet runtime */
+    int external_fujinet;     /* 1: don't start it; dial the FujiNet listening
+                               * at boip_connect instead */
+    const char *boip_connect; /* "host:port" of that FujiNet (external only);
+                               * NULL/"" = 127.0.0.1:11506 */
     int enable_audio;         /* open the SDL audio device */
     int enable_gamepad;       /* start the SDL gamepad thread */
 } nessession_start_opts;
 
 /* Fills opts from the settings store (keys: cart region port0_type
- * port1_type analog_joystick keyboard enable_fujinet enable_audio
- * enable_gamepad). */
+ * port1_type analog_joystick keyboard enable_fujinet fujinet_external
+ * fujinet_external_addr enable_audio enable_gamepad). */
 void nessession_default_opts(nessession *s, nessession_start_opts *opts);
 
 /* Starts FujiNet (if enabled) and then the emulator.
@@ -397,7 +401,20 @@ void nessession_sysaction_post(nessession *s, int sysact);
 int  nessession_sysaction_take(nessession *s, int *out);
 
 /* ---- FujiNet -------------------------------------------------------------*/
+/* Parses the "Use external FujiNet" address field: "host:port" (host a name
+ * or an IPv4 literal) or a bare "port". Empty text means the default,
+ * 127.0.0.1:11506. Returns 0 and fills host/port, or -1 when the text is not
+ * an address:port (nothing is written then). */
+int         nessession_parse_hostport(const char *text, char *host, int hostsz,
+                                      int *port);
 int         nessession_fujinet_running(const nessession *s);
+/* 1 when the session was started to dial an external FujiNet. */
+int         nessession_fujinet_external(const nessession *s);
+/* "host:port" the cartridge dials (the running session's, or the default
+ * 127.0.0.1:11506 before the first start). */
+const char *nessession_boip_endpoint(const nessession *s);
+/* The built-in FujiNet's web UI; empty while the FujiNet is external (it has
+ * its own). */
 const char *nessession_fujinet_webui_url(const nessession *s);
 int         nessession_fujinet_copy_log(nessession *s, char *dst, int max);
 /* The cartridge's link to FujiNet: 1 up, 0 down, -1 not running. */

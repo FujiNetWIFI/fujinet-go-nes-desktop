@@ -194,7 +194,8 @@ static void update_status(void)
     } else {
         g_pad_notice[0] = '\0';
         snprintf(line, sizeof line, "FujiNet: %s%s", st,
-                 nessession_fujinet_running(g_session) ? "" : " (runtime not running)");
+                 nessession_fujinet_external(g_session) ? " (external)"
+                 : nessession_fujinet_running(g_session) ? "" : " (runtime not running)");
     }
     /* The expansion port: KBD while typing goes to the emulated keyboard,
      * and what the Data Recorder is doing. */
@@ -338,6 +339,10 @@ static int pick_tape(int record, char *path, DWORD pathsz)
  * the session when the window closes.
  */
 
+#ifndef EM_SETCUEBANNER
+#define EM_SETCUEBANNER 0x1501
+#endif
+
 static HWND g_settings_window;
 static int g_settings_dirty;
 static HWND g_pad_list, g_pad_port, g_port_combo[2], g_kbd_combo;
@@ -437,6 +442,11 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         case IDC_SET_FUJINET: settings_apply_checkbox(hwnd, IDC_SET_FUJINET, "enable_fujinet", 1); return 0;
+        case IDC_SET_EXTERNAL:
+            settings_apply_checkbox(hwnd, IDC_SET_EXTERNAL, "fujinet_external", 0);
+            EnableWindow(GetDlgItem(hwnd, IDC_SET_EXT_ADDR),
+                         SendMessageA(GetDlgItem(hwnd, IDC_SET_EXTERNAL), BM_GETCHECK, 0, 0) == BST_CHECKED);
+            return 0;
         case IDC_SET_AUDIO: settings_apply_checkbox(hwnd, IDC_SET_AUDIO, "enable_audio", 1); return 0;
         case IDC_SET_GAMEPAD: settings_apply_checkbox(hwnd, IDC_SET_GAMEPAD, "enable_gamepad", 1); return 0;
         default: break;
@@ -453,9 +463,31 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (gen != seen) { seen = gen; refresh_pad_list(); }
         }
         return 0;
-    case WM_CLOSE:
+    case WM_CLOSE: {
+        /* The address is checked on the way out; a bad one keeps the window
+         * open. What is saved is the trimmed text the parser read. */
+        char addr[96], host[64];
+        int port;
+        char *text = addr;
+        size_t len;
+        GetDlgItemTextA(hwnd, IDC_SET_EXT_ADDR, addr, sizeof addr);
+        while (*text == ' ' || *text == '\t') text++;
+        len = strlen(text);
+        while (len && (text[len - 1] == ' ' || text[len - 1] == '\t')) text[--len] = '\0';
+        if (SendMessageA(GetDlgItem(hwnd, IDC_SET_EXTERNAL), BM_GETCHECK, 0, 0) == BST_CHECKED &&
+            nessession_parse_hostport(text, host, sizeof host, &port) != 0) {
+            MessageBoxA(hwnd, "That is not an address:port.\n\nExample: 127.0.0.1:11506",
+                        "External FujiNet", MB_ICONWARNING | MB_OK);
+            SetFocus(GetDlgItem(hwnd, IDC_SET_EXT_ADDR));
+            return 0;
+        }
+        if (strcmp(text, nessession_get_str(g_session, "fujinet_external_addr", "")) != 0) {
+            nessession_set_str(g_session, "fujinet_external_addr", text);
+            g_settings_dirty = 1;
+        }
         DestroyWindow(hwnd);
         return 0;
+    }
     case WM_DESTROY:
         KillTimer(hwnd, IDT_SETTINGS_PADS);
         g_settings_window = NULL;
@@ -523,7 +555,7 @@ static void show_settings(HINSTANCE inst)
     }
     g_settings_window = CreateWindowA("NESSettingsWindow", "Settings",
         WS_OVERLAPPEDWINDOW & ~(WS_MAXIMIZEBOX | WS_THICKFRAME),
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 630, NULL, NULL, inst, NULL);
+        CW_USEDEFAULT, CW_USEDEFAULT, 460, 690, NULL, NULL, inst, NULL);
 
     settings_label(g_settings_window, inst, "Machine", 16, y, 420, 18); y += 22;
     settings_label(g_settings_window, inst, "Region:", 16, y + 3, 90, 18);
@@ -578,6 +610,20 @@ static void show_settings(HINSTANCE inst)
     settings_label(g_settings_window, inst, "Host (applied by restarting the session)", 16, y, 420, 18); y += 22;
     settings_checkbox(g_settings_window, inst, "Enable FujiNet", IDC_SET_FUJINET, 16, y, 200,
                       nessession_get_int(g_session, "enable_fujinet", 1)); y += 26;
+    settings_checkbox(g_settings_window, inst, "Use external FujiNet (connect to another instance)",
+                      IDC_SET_EXTERNAL, 16, y, 420,
+                      nessession_get_int(g_session, "fujinet_external", 0)); y += 26;
+    settings_label(g_settings_window, inst, "Address:port:", 34, y + 3, 80, 18);
+    {
+        HWND edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT",
+                                    nessession_get_str(g_session, "fujinet_external_addr", ""),
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 120, y, 200, 22,
+                                    g_settings_window, (HMENU)(INT_PTR)IDC_SET_EXT_ADDR, inst, NULL);
+        SendMessageA(edit, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(edit, EM_SETCUEBANNER, FALSE, (LPARAM)L"127.0.0.1:11506");
+        EnableWindow(edit, nessession_get_int(g_session, "fujinet_external", 0) != 0);
+    }
+    y += 30;
     settings_checkbox(g_settings_window, inst, "Audio", IDC_SET_AUDIO, 16, y, 200,
                       nessession_get_int(g_session, "enable_audio", 1)); y += 26;
     settings_checkbox(g_settings_window, inst, "Gamepads", IDC_SET_GAMEPAD, 16, y, 200,
@@ -903,8 +949,19 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case IDM_SETTINGS: show_settings((HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE)); return 0;
-        case IDM_FUJINET_LOG: show_fujinet_log((HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE)); return 0;
+        case IDM_FUJINET_LOG:
+            if (nessession_fujinet_external(g_session)) {
+                MessageBoxA(hwnd, "FujiNet is external: its console output is in the process that "
+                            "is running it.", "FujiNet", MB_ICONINFORMATION | MB_OK);
+                return 0;
+            }
+            show_fujinet_log((HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE)); return 0;
         case IDM_FUJINET_CONFIG:
+            if (nessession_fujinet_external(g_session)) {
+                MessageBoxA(hwnd, "FujiNet is external: use the web UI of that instance.",
+                            "FujiNet", MB_ICONINFORMATION | MB_OK);
+                return 0;
+            }
             if (!nessession_fujinet_running(g_session)) {
                 MessageBoxA(hwnd, "FujiNet is not running.", "FujiNet", MB_ICONINFORMATION | MB_OK);
                 return 0;

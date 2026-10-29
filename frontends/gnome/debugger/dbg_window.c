@@ -527,7 +527,13 @@ static void refresh_fujinet(DbgWin *w, gboolean force)
 
     if (!nessession_is_running(w->session))
         gtk_label_set_text(w->fuji_note, "The NES is off.");
-    else if (!nessession_fujinet_running(w->session))
+    else if (nessession_fujinet_external(w->session)) {
+        char note[160];
+        g_snprintf(note, sizeof note, "External FujiNet at %s; the cartridge is %s.",
+                   nessession_boip_endpoint(w->session),
+                   nessession_cart_link_up(w->session) == 1 ? "connected" : "not connected");
+        gtk_label_set_text(w->fuji_note, note);
+    } else if (!nessession_fujinet_running(w->session))
         gtk_label_set_text(w->fuji_note, "FujiNet is off (Preferences \xe2\x96\xb8 Host \xe2\x96\xb8 Enable FujiNet).");
     else
         gtk_label_set_text(w->fuji_note, nessession_cart_link_up(w->session) == 1

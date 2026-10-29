@@ -1020,6 +1020,10 @@ static void setText(NSTextView *view, NSString *text, BOOL follow)
     if (n < 0) n = 0;
     if (!nessession_is_running(_session))
         _fujiNote.stringValue = @"The NES is off.";
+    else if (nessession_fujinet_external(_session))
+        _fujiNote.stringValue = [NSString stringWithFormat:@"External FujiNet at %s; the cartridge is %s.",
+                                 nessession_boip_endpoint(_session),
+                                 nessession_cart_link_up(_session) == 1 ? "connected" : "not connected"];
     else if (!nessession_fujinet_running(_session))
         _fujiNote.stringValue = @"FujiNet is off (Settings ▸ Enable FujiNet).";
     else

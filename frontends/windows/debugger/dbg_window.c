@@ -580,7 +580,13 @@ static void refresh_fujinet(debugger *d, int force)
 
     if (!nessession_is_running(d->session))
         set_label(d->fuji_note, "The NES is off.");
-    else if (!nessession_fujinet_running(d->session))
+    else if (nessession_fujinet_external(d->session)) {
+        char note[160];
+        snprintf(note, sizeof note, "External FujiNet at %s; the cartridge is %s.",
+                 nessession_boip_endpoint(d->session),
+                 nessession_cart_link_up(d->session) == 1 ? "connected" : "not connected");
+        set_label(d->fuji_note, note);
+    } else if (!nessession_fujinet_running(d->session))
         set_label(d->fuji_note, "FujiNet is off (Machine > Settings > Enable FujiNet).");
     else
         set_label(d->fuji_note, nessession_cart_link_up(d->session) == 1

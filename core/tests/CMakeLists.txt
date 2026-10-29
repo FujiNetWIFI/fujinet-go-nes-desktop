@@ -61,6 +61,18 @@ target_link_libraries(netboot_test PRIVATE nes_session)
 add_test(NAME netboot COMMAND netboot_test)
 set_tests_properties(netboot PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180 RUN_SERIAL ON)
 
+# The external-FujiNet address field, pure.
+add_executable(hostport_test hostport_test.c)
+target_link_libraries(hostport_test PRIVATE nes_session)
+add_test(NAME hostport COMMAND hostport_test)
+
+# "Use external FujiNet" end to end: a bad address refuses, a good one is
+# dialled by the cartridge (a stand-in listener sees it), no runtime starts.
+add_executable(external_test external_test.c)
+target_link_libraries(external_test PRIVATE nes_session)
+add_test(NAME external COMMAND external_test)
+set_tests_properties(external PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
 # The gamepad layer's pure helpers, and that the SDL subsystem starts and
 # stops with no hardware attached.
 add_executable(gamepad_test gamepad_test.c)
