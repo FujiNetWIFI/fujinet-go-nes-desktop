@@ -81,6 +81,10 @@ front (`#808080`). The same red is the UI accent, marking held buttons, the
 Map target, the current line in the disassembly and the Run button while
 stopped.
 
+## External FujiNet
+
+A switch in Preferences makes the app connect to another FujiNet instance at a host:port you enter, e.g. `127.0.0.1:11506`, instead of starting the built-in one.
+
 ## Building
 
 ```sh
