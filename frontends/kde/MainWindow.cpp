@@ -24,6 +24,7 @@
 #include <QUrl>
 
 #include "DisplayWidget.h"
+#include "SoftDisplayWidget.h"
 #include "FujiNetWindows.h"
 #include "KeyForward.h"
 #include "SettingsDialog.h"
@@ -41,8 +42,12 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
     resize(876, 720 + 60);
     setAcceptDrops(true);
 
-    m_display = new DisplayWidget(session, this);
-    setCentralWidget(m_display);
+    auto *gpu = new DisplayWidget(session, this);
+    m_display = gpu;
+    setCentralWidget(gpu);
+    /* No usable GPU device: fall back to painting in software */
+    connect(gpu, &QRhiWidget::renderFailed, this, &MainWindow::useSoftwareDisplay,
+            Qt::QueuedConnection);
 
     m_dot = new QLabel(QStringLiteral("●"));
     m_status = new QLabel(QStringLiteral("Starting..."));
@@ -50,7 +55,7 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
     statusBar()->addWidget(m_status);
     m_kbd = new QLabel;
     statusBar()->addPermanentWidget(m_kbd);
-    m_display->installEventFilter(this);
+    m_display->widget()->installEventFilter(this);
 
     buildMenus();
     applyPicture();
@@ -201,11 +206,22 @@ void MainWindow::showSettings()
     if (restart) restartSession();
 }
 
+void MainWindow::useSoftwareDisplay()
+{
+    if (dynamic_cast<SoftDisplayWidget *>(m_display))
+        return;
+    auto *soft = new SoftDisplayWidget(m_session, this);
+    m_display = soft;
+    setCentralWidget(soft);   /* deletes the GPU display, which stops its feed */
+    m_display->widget()->installEventFilter(this);
+    applyPicture();
+}
+
 void MainWindow::applyPicture()
 {
     const int aspect = nessession_get_int(m_session, "aspect", 0);
     const bool smooth = nessession_get_int(m_session, "smooth", 0) != 0;
-    m_display->setAspect(aspect);
+    m_display->setTvAspect(aspect == 0);
     m_display->setSmooth(smooth);
     if (m_squareAction) m_squareAction->setChecked(aspect != 0);
     if (m_smoothAction) m_smoothAction->setChecked(smooth);
@@ -408,7 +424,7 @@ bool MainWindow::captureKey(QEvent *e)
 
 bool MainWindow::eventFilter(QObject *o, QEvent *e)
 {
-    if (o == m_display && captureKey(e)) return true;
+    if (o == m_display->widget() && captureKey(e)) return true;
     return QMainWindow::eventFilter(o, e);
 }
 

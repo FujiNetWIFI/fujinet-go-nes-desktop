@@ -36,11 +36,13 @@ static void sleep_ms(int ms)
 static int wait_frames(nessession *s, uint64_t *serial, int count, int timeout_ms)
 {
     static uint32_t px[NESSESSION_FB_WIDTH * NESSESSION_FB_MAX_HEIGHT];
-    int got = 0, waited = 0, h;
+    /* A frame identical to its predecessor is not published again, so count
+     * the machine's frames, not copy_frame's serial. */
+    uint64_t start = nessession_frame_count(s);
+    int waited = 0, h;
     while (waited < timeout_ms) {
-        if (nessession_copy_frame(s, px, &h, serial)) {
-            if (++got >= count) return 1;
-        }
+        nessession_copy_frame(s, px, &h, serial);
+        if (nessession_frame_count(s) >= start + (uint64_t)count) return 1;
         sleep_ms(2); waited += 2;
     }
     return 0;
@@ -117,6 +119,7 @@ int main(void)
     if (!nessession_is_running(s)) { printf("error: %s\n", nessession_last_error(s)); return 1; }
 
     check(wait_frames(s, &serial, 30, 5000), "frames arrive");
+    check(serial != 0, "CONFIG published a picture");
     check(wait_status(s, "link down", 5000), "CONFIG went through the loader and runs link-down");
     check(!nessession_cart_booted_game(s), "CONFIG is not a booted game");
     {

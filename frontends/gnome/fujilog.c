@@ -9,12 +9,15 @@
 
 #include "fujilog.h"
 
+#include <string.h>
+
 typedef struct {
     GtkWindow *win;
     GtkTextView *view;
     GtkScrolledWindow *scroll;
     nessession *session;
     guint timer;
+    char *last;           /* the text last shown */
 } LogWindow;
 
 static void on_destroy(GtkWidget *w, gpointer user_data)
@@ -25,6 +28,7 @@ static void on_destroy(GtkWidget *w, gpointer user_data)
         g_source_remove(lw->timer);
         lw->timer = 0;
     }
+    g_free(lw->last);
     g_free(lw);
 }
 
@@ -44,7 +48,16 @@ static gboolean refresh(gpointer user_data)
     }
 
     n = nessession_fujinet_copy_log(lw->session, buf, sizeof buf);
-    gtk_text_buffer_set_text(b, n > 0 ? buf : "(no FujiNet output yet)", -1);
+    {
+        const char *text = n > 0 ? buf : "(no FujiNet output yet)";
+
+        /* unchanged log: no re-layout of 128 KB of text */
+        if (lw->last && strcmp(lw->last, text) == 0)
+            return G_SOURCE_CONTINUE;
+        g_free(lw->last);
+        lw->last = g_strdup(text);
+        gtk_text_buffer_set_text(b, text, -1);
+    }
 
     /* Follow the tail only while the reader is already at the bottom. */
     if (at_end && adj)

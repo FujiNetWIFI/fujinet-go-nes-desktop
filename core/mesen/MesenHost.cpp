@@ -354,6 +354,7 @@ void MesenHost::ApplySettings()
 	VideoConfig video = settings->GetVideoConfig();
 	video.VideoFilter = VideoFilterType::None;
 	video.AspectRatio = VideoAspectRatio::NoStretching;
+	video.DisableHighPrecisionFramePacing = true;  // no spin-wait: it burns a core for sub-ms accuracy
 	settings->SetVideoConfig(video);
 
 	NesConfig nes = settings->GetNesConfig();
@@ -489,15 +490,36 @@ void MesenHost::PublishFrame(const uint32_t* argb, uint32_t width, uint32_t heig
 	if(!argb || width == 0 || height == 0) {
 		return;
 	}
-	std::lock_guard<std::mutex> lock(_frameLock);
+	_frameCount++;
 	size_t n = (size_t)width * height;
-	if(_frame.size() < n) {
-		_frame.resize(n);
+	{
+		std::lock_guard<std::mutex> lock(_frameLock);
+		// A frame identical to the one in the slot is not a new frame: the
+		// serial stays and nobody is called. The console runs at 60 Hz
+		// whatever it shows, and CONFIG or a menu does not move.
+		if(_frameSerial != 0 && width == _frameWidth && height == _frameHeight &&
+		   memcmp(_frame.data(), argb, n * sizeof(uint32_t)) == 0) {
+			return;
+		}
+		if(_frame.size() < n) {
+			_frame.resize(n);
+		}
+		memcpy(_frame.data(), argb, n * sizeof(uint32_t));
+		_frameWidth = width;
+		_frameHeight = height;
+		_frameSerial++;
 	}
-	memcpy(_frame.data(), argb, n * sizeof(uint32_t));
-	_frameWidth = width;
-	_frameHeight = height;
-	_frameSerial++;
+	std::lock_guard<std::mutex> cb(_cbLock);
+	if(_frameCb) {
+		_frameCb(_frameCbCtx);
+	}
+}
+
+void MesenHost::SetFrameCallback(FrameCallback cb, void* ctx)
+{
+	std::lock_guard<std::mutex> cbLock(_cbLock);
+	_frameCb = cb;
+	_frameCbCtx = ctx;
 }
 
 bool MesenHost::CopyFrame(uint32_t* dst, size_t maxPixels, uint32_t& width, uint32_t& height, uint64_t* serialInOut)

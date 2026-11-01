@@ -639,6 +639,22 @@ static void refresh_all(DbgWin *w)
     refresh_fujinet(w, FALSE);
 }
 
+static gboolean tick_refresh(gpointer ud);
+
+static void on_map(GtkWidget *widget, gpointer ud)
+{
+    DbgWin *w = ud;
+    (void)widget;
+    if (!w->timer) w->timer = g_timeout_add(100, tick_refresh, w);
+}
+
+static void on_unmap(GtkWidget *widget, gpointer ud)
+{
+    DbgWin *w = ud;
+    (void)widget;
+    if (w->timer) { g_source_remove(w->timer); w->timer = 0; }
+}
+
 static void attach_and_refresh(DbgWin *w);
 
 static gboolean tick_refresh(gpointer ud)
@@ -1362,7 +1378,9 @@ void nes_debugger_show(GtkWindow *parent, nessession *session)
     gtk_widget_add_controller(GTK_WIDGET(w->win), keys);
 
     attach_and_refresh(w);
-    w->timer = g_timeout_add(100, tick_refresh, w);
+    /* the refresh timer runs only while the window is on screen */
+    g_signal_connect(w->win, "map", G_CALLBACK(on_map), w);
+    g_signal_connect(w->win, "unmap", G_CALLBACK(on_unmap), w);
     gtk_window_present(w->win);
 }
 

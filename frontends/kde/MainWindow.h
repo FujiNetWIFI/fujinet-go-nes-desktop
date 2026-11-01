@@ -10,7 +10,7 @@
 
 #include "nessession.h"
 
-class DisplayWidget;
+class DisplayView;
 class ControllersWindow;
 class QAction;
 
@@ -38,6 +38,7 @@ private:
     void toggleControllers();
     void pollGamepads();
     void applyPicture();
+    void useSoftwareDisplay();
     void showSettings();
     void restartSession();
     void showAbout();
@@ -46,7 +47,7 @@ private:
     bool captureKey(QEvent *e);
 
     nessession *m_session;
-    DisplayWidget *m_display = nullptr;
+    DisplayView *m_display = nullptr;
     ControllersWindow *m_controllers = nullptr;
     QLabel *m_status = nullptr;
     QLabel *m_dot = nullptr;

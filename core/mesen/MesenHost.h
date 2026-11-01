@@ -96,6 +96,14 @@ public:
 	void NotifyVsync(int64_t frameTimeNs);
 	double GetFps();
 
+	// Told on the emulation thread after each new frame is published. Keep it
+	// quick, do not call back into the host: it runs with a lock held, so
+	// SetFrameCallback(nullptr, nullptr) waits for a call in flight.
+	typedef void (*FrameCallback)(void* ctx);
+	void SetFrameCallback(FrameCallback cb, void* ctx);
+	// Frames the machine has run, including ones identical to their predecessor.
+	uint64_t GetFrameCount() { return _frameCount.load(); }
+
 	void FillAudio(float* out, uint32_t frames);
 	void SetVolume(int percent);
 
@@ -154,6 +162,10 @@ private:
 	uint32_t _frameWidth = 256;
 	uint32_t _frameHeight = 240;
 	uint64_t _frameSerial = 0;
+	std::atomic<uint64_t> _frameCount{0};
+	std::mutex _cbLock;
+	FrameCallback _frameCb = nullptr;
+	void* _frameCbCtx = nullptr;
 
 	// ---- vsync phase lock ----
 	std::mutex _vsyncLock;

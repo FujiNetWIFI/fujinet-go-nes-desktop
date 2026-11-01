@@ -167,6 +167,19 @@ int  nessession_copy_frame(nessession *s, uint32_t *dst, int *height,
 /* 60 or 50: the running region's refresh rate (rounded). */
 int  nessession_refresh_rate(nessession *s);
 
+/* Ask to be told when a new frame is ready, for a frontend with no frame
+ * clock of its own: cb(ctx) runs on the machine thread after each frame is
+ * published. Keep it quick (post an event and return) and do not call into
+ * the session from it. Passing NULL stops the calls, and returns only after
+ * any call in flight has finished, so ctx may be freed right after. A frame
+ * identical to the previous one is not published again. */
+typedef void (*nessession_frame_cb)(void *ctx);
+void nessession_set_frame_callback(nessession *s, nessession_frame_cb cb, void *ctx);
+/* Frames the machine has run since it started, including the ones identical
+ * to their predecessor (which copy_frame's serial skips): use it to ask "is
+ * the machine running", not "is the picture changing". */
+uint64_t nessession_frame_count(nessession *s);
+
 /* Feed the UI's frame-clock ticks (CLOCK_MONOTONIC ns). While a steady
  * stream near the console's refresh rate arrives, the emulator phase-locks
  * one frame per tick; otherwise Mesen paces on the wall clock. A frontend

@@ -483,6 +483,16 @@ extern "C" int nessession_copy_frame(nessession* s, uint32_t* dst, int* height,
   return 1;
 }
 
+extern "C" void nessession_set_frame_callback(nessession* s, nessession_frame_cb cb, void* ctx)
+{
+  if(s->host) host_of(s)->SetFrameCallback(cb, ctx);
+}
+
+extern "C" uint64_t nessession_frame_count(nessession* s)
+{
+  return s->host ? host_of(s)->GetFrameCount() : 0;
+}
+
 extern "C" int nessession_refresh_rate(nessession* s)
 {
   if(!s->host) return 60;

@@ -157,7 +157,7 @@ DebuggerWindow::DebuggerWindow(nessession *session, QWidget *parent)
     setCentralWidget(central);
 
     connect(&m_timer, &QTimer::timeout, this, &DebuggerWindow::tick);
-    m_timer.start(100);
+    /* the timer runs only while the window is shown (showEvent/hideEvent) */
 }
 
 /* ---- building ------------------------------------------------------------- */
@@ -867,10 +867,17 @@ void DebuggerWindow::closeEvent(QCloseEvent *e)
     e->ignore();
 }
 
+void DebuggerWindow::showEvent(QShowEvent *e)
+{
+    QMainWindow::showEvent(e);
+    m_timer.start(100);
+}
+
 /* Hidden by F12, the close button or the main window: the engine goes
  * away and the machine runs on. */
 void DebuggerWindow::hideEvent(QHideEvent *e)
 {
+    m_timer.stop();
     nesdebug_detach(m_dbg);
     QMainWindow::hideEvent(e);
 }
