@@ -31,7 +31,7 @@ add_executable(fujinet-go-nes-kde
 target_link_libraries(fujinet-go-nes-kde PRIVATE nes_session Qt6::Widgets Qt6::GuiPrivate)
 # The display's shaders, baked for every backend and embedded as resources.
 qt_add_shaders(fujinet-go-nes-kde "display_shaders"
-  PREFIX "/shaders"
+  PREFIX "/"
   FILES shaders/display.vert shaders/display.frag)
 target_compile_options(fujinet-go-nes-kde PRIVATE -Wall -Wextra)
 target_compile_definitions(fujinet-go-nes-kde PRIVATE
