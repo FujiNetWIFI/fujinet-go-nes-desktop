@@ -16,6 +16,10 @@ GtkWidget *nes_window_new(AdwApplication *app, nessession *session);
 /* main.c: the icon name to use (the installed id, or the in-tree art). */
 const char *nes_icon_name(void);
 void nes_window_toast(NESWindow *self, const char *text);
+
+/* The Help context the main window shows now: "main", or "prefs/Machine"
+ * while Preferences is open. */
+const char *nes_window_help_context(NESWindow *self);
 /* The display's shape: 0 = the television's 8:7 pixels, 1 = square. */
 void nes_window_apply_aspect(NESWindow *self, int aspect);
 

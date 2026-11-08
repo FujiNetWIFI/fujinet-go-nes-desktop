@@ -22,6 +22,7 @@ add_executable(fujinet-go-nes-macos MACOSX_BUNDLE
   AppDelegate.m
   DisplayView.m
   KeyForward.m
+  help/HelpWindow.m
   controllers/ControllersWindow.m
   debugger/DebuggerWindow.m
   "${NES_ICNS}"

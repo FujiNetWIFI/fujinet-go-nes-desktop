@@ -39,6 +39,7 @@
 #include "controllers_window.h"
 
 #include "../window.h"
+#include "../help/help_window.h"
 
 #include <string.h>
 
@@ -751,6 +752,8 @@ static void build_window(GtkWindow *parent)
     adw_view_stack_page_set_icon_name(page, "input-keyboard-symbolic");
 
     header = adw_header_bar_new();
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), nes_help_button("controllers"));
+    nes_help_set_context(GTK_WINDOW(g_window), "controllers");
     switcher = adw_view_switcher_new();
     adw_view_switcher_set_stack(ADW_VIEW_SWITCHER(switcher), ADW_VIEW_STACK(g_view_stack));
     adw_view_switcher_set_policy(ADW_VIEW_SWITCHER(switcher), ADW_VIEW_SWITCHER_POLICY_WIDE);

@@ -19,7 +19,7 @@
       SRAMs, and a local .nes file can be opened in place of CONFIG. Both
       controllers are on screen and remappable, gamepads are picked up as
       they are plugged in, and a native debugger built on Mesen's own engine
-      is a key press away.
+      is a key press away. Built-in, searchable Help covers all of it.
     </p>
     <p>
       The Famicom expansion port takes a keyboard: the Family BASIC

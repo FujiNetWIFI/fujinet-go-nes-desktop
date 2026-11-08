@@ -5,10 +5,12 @@
  */
 
 #include "SettingsDialog.h"
+#include "help/HelpWindow.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QShortcut>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -166,7 +168,12 @@ bool SettingsDialog::run(QWidget *parent, nessession *session)
     hform->addWidget(snd); hform->addWidget(gp);
     outer->addWidget(host);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    /* Help, F1 and Ctrl+Shift+H (the app's shortcuts don't reach a modal dialog) */
+    dlg.setProperty("nesHelpContext", QStringLiteral("prefs/Machine"));
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Help);
+    QObject::connect(buttons, &QDialogButtonBox::helpRequested, &dlg, [&dlg] { nesHelpFor(&dlg); });
+    for (const char *key : { "F1", "Ctrl+Shift+H" })
+        new QShortcut(QKeySequence(QString::fromLatin1(key)), &dlg, [&dlg] { nesHelpFor(&dlg); });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
         char hostName[64];
         int port;

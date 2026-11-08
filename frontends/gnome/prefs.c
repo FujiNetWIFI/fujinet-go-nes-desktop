@@ -15,6 +15,7 @@
 #include "prefs.h"
 
 #include "window.h"
+#include "help/help_window.h"
 
 typedef struct {
     NESWindow *window;
@@ -284,9 +285,11 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
     adw_dialog_set_title(ADW_DIALOG(dialog), "Preferences");
     adw_dialog_set_content_width(ADW_DIALOG(dialog), 560);
     adw_preferences_page_set_title(page, "Machine");
+    adw_preferences_page_set_name(page, "Machine");
     adw_preferences_page_set_icon_name(page, "applications-games-symbolic");
 
     adw_preferences_group_set_title(machine, "Machine");
+    adw_preferences_group_set_header_suffix(machine, nes_help_button("prefs/Machine"));
     adw_preferences_group_add(machine,
         combo_row(state, "Region", "Auto follows the image's header. Takes effect at "
                   "the next power cycle (Reset to CONFIG, or opening a cartridge)",

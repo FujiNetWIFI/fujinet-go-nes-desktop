@@ -96,6 +96,21 @@ if(NOT SDL3_FOUND)
   return()
 endif()
 
+# The Help, embedded: data/help/help.md as topics of styled spans
+# (core/include/neshelp.h), which every frontend lays out with its own
+# toolkit. help_data.h declares the table; the build generates it.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(NES_HELP_C "${CMAKE_BINARY_DIR}/generated/help_content.c")
+add_custom_command(
+  OUTPUT "${NES_HELP_C}"
+  COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/help/make-help.py"
+          --src "${CMAKE_SOURCE_DIR}/data/help/help.md"
+          --out-c "${NES_HELP_C}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/tools/help/make-help.py"
+          "${CMAKE_SOURCE_DIR}/data/help/help.md"
+  COMMENT "Help"
+  VERBATIM)
+
 set(NES_SESSION_C_SOURCES
   src/settings.c
   src/paths.c
@@ -104,7 +119,9 @@ set(NES_SESSION_C_SOURCES
   src/audio_sdl.c
   src/bindings.c
   src/keyboard.c
-  src/hid_keys.c)
+  src/hid_keys.c
+  src/help.c
+  "${NES_HELP_C}")
 set(NES_SESSION_CXX_SOURCES
   src/session.cpp
   src/debug.cpp

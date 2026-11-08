@@ -14,6 +14,7 @@
 #import "DebuggerWindow.h"
 
 #import "../KeyForward.h"
+#import "../help/HelpWindow.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -349,6 +350,8 @@ static void setText(NSTextView *view, NSString *text, BOOL follow)
 
 - (void)tabView:(NSTabView *)tabView didSelectTabViewItem:(NSTabViewItem *)item
 {
+    /* The Help button and Command+? open the tab being shown. */
+    NESSetHelpContext(_window, [@"debugger/" stringByAppendingString:item.identifier]);
     if ([tabView indexOfTabViewItem:item] == TAB_FUJINET) [self refreshFujinet:NO];
 }
 
@@ -606,7 +609,9 @@ static void setText(NSTextView *view, NSString *text, BOOL follow)
     _status = [self label:@"Running"];
     _status.alignment = NSTextAlignmentRight;
     _status.textColor = NSColor.secondaryLabelColor;
-    NSStackView *toolbar = hstack(@[_runBtn, step, over, outBtn, scan, frame, _status]);
+    NSButton *helpBtn = NESHelpButton(nil);
+    [helpBtn setRefusesFirstResponder:YES];
+    NSStackView *toolbar = hstack(@[_runBtn, step, over, outBtn, scan, frame, _status, helpBtn]);
     [_status setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     _tabs = [[NSTabView alloc] init];
@@ -615,7 +620,10 @@ static void setText(NSTextView *view, NSString *text, BOOL follow)
                         @[@"APU & Input", [self buildApu]], @[@"Breakpoints", [self buildBreaks]],
                         @[@"Cart", [self buildCart]], @[@"FujiNet", [self buildFujinet]] ];
     for (NSArray *page in pages) {
-        NSTabViewItem *item = [NSTabViewItem tabViewItemWithViewController:nil];
+        static const char *const kHelpTabs[] = { "prompt", "cpu", "disassembly", "ppu", "apu", "breakpoints",
+                                                 "cart", "fujinet" };
+        NSTabViewItem *item = [[NSTabViewItem alloc]
+            initWithIdentifier:@(kHelpTabs[[pages indexOfObject:page]])];
         item.label = page[0];
         NSView *content = page[1];
         NSView *holder = [[NSView alloc] init];
@@ -634,6 +642,7 @@ static void setText(NSTextView *view, NSString *text, BOOL follow)
         if (t >= 0 && t < (int)_tabs.numberOfTabViewItems) [_tabs selectTabViewItemAtIndex:t];
     }
     _tabs.delegate = self;
+    NESSetHelpContext(_window, [@"debugger/" stringByAppendingString:_tabs.selectedTabViewItem.identifier]);
 
     NSStackView *root = vstack(@[toolbar, _tabs]);
     root.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);

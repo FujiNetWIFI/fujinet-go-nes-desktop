@@ -29,6 +29,7 @@
 #include "KeyForward.h"
 #include "SettingsDialog.h"
 #include "debugger/DebuggerWindow.h"
+#include "help/HelpWindow.h"
 #include "controllers/ControllersWindow.h"
 
 static const char *const kCartFilter =
@@ -38,6 +39,7 @@ MainWindow::MainWindow(nessession *session, QWidget *parent)
     : QMainWindow(parent), m_session(session)
 {
     setWindowTitle(QStringLiteral("FujiNet Go NES"));
+    setProperty("nesHelpContext", QStringLiteral("main"));
     /* 292x240 (8:7 pixels) at 3x. */
     resize(876, 720 + 60);
     setAcceptDrops(true);
@@ -184,6 +186,18 @@ void MainWindow::buildMenus()
     });
 
     QMenu *help = menuBar()->addMenu(QStringLiteral("&Help"));
+    {
+        /* works from every window of the app (the Controllers window and the
+         * Debugger have the keyboard too) */
+        QAction *helpAct = help->addAction(QStringLiteral("FujiNet Go NES &Help"));
+        helpAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
+        helpAct->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(helpAct);
+        connect(helpAct, &QAction::triggered, this, [this] {
+            nesHelpFor(QApplication::activeWindow() ? QApplication::activeWindow() : this);
+        });
+    }
+    help->addSeparator();
     help->addAction(QStringLiteral("&About FujiNet Go NES"), this, &MainWindow::showAbout);
 }
 

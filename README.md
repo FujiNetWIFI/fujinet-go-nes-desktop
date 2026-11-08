@@ -38,6 +38,11 @@ desktop app. A member of the FujiNet Go desktop family
   no reset line, so whatever it holds restarts. **Reset to CONFIG** (Escape)
   is a power cycle of the cartridge: it ejects an opened cartridge and boots
   CONFIG through the loader again.
+- **Built-in Help.** **Help ▸ FujiNet Go NES Help** (Ctrl+Shift+H, ⌘? on a
+  Mac) opens a searchable Help, and the Help buttons in Preferences, the
+  Controllers window, the debugger and the console log open the topic for what
+  they show. The text is [data/help/help.md](data/help/help.md), which GitHub
+  shows as it is; the build embeds it and every frontend lays it out natively.
 - **The debugger, in every frontend.** F12 opens it and stops the machine:
   Run/Stop (F5), Step (F7), Step Over (F8), Step Out (Shift+F8), Scanline+1,
   Frame+1. Tabs: a Prompt (`help`, `break`, `bpr`/`bpw` with Mesen

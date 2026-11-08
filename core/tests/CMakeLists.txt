@@ -64,6 +64,11 @@ set_tests_properties(netboot PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180 RUN_SERI
 # The external-FujiNet address field, pure.
 add_executable(hostport_test hostport_test.c)
 target_link_libraries(hostport_test PRIVATE nes_session)
+
+# The built-in Help covers every setting, key and context.
+add_executable(help_test help_test.c)
+target_link_libraries(help_test PRIVATE nes_session)
+add_test(NAME help COMMAND help_test)
 add_test(NAME hostport COMMAND hostport_test)
 
 # "Use external FujiNet" end to end: a bad address refuses, a good one is

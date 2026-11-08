@@ -32,6 +32,7 @@
 
 #include "nesdebug.h"
 #include "../window.h"
+#include "../help/help_window.h"
 
 #define DISASM_WINDOW 48
 #define TRACE_MAX 512
@@ -908,9 +909,18 @@ static void on_fuji_clear(GtkButton *b, gpointer ud)
     refresh_fujinet(w, TRUE);
 }
 
+/* Help's contexts (neshelp.h), one per tab */
+static const char *const k_tab_contexts[] = {
+    "debugger/prompt", "debugger/cpu", "debugger/disassembly", "debugger/ppu",
+    "debugger/apu", "debugger/breakpoints", "debugger/cart", "debugger/fujinet",
+};
+
 static void on_switch_page(GtkNotebook *nb, GtkWidget *page, guint num, gpointer ud)
 {
+    DbgWin *hw = ud;
     (void)nb; (void)page;
+    if (num < G_N_ELEMENTS(k_tab_contexts))
+        nes_help_set_context(hw->win, k_tab_contexts[num]);
     if (num == PAGE_FUJINET) refresh_fujinet(ud, FALSE);
 }
 
@@ -985,6 +995,7 @@ static gboolean on_key(GtkEventControllerKey *c, guint keyval, guint code,
     DbgWin *w = ud;
     (void)c; (void)code;
     switch (keyval) {
+    case GDK_KEY_F1: nes_help_for(w->win); return TRUE;
     case GDK_KEY_F5: on_run(NULL, w); return TRUE;
     case GDK_KEY_F7: on_step(NULL, w); return TRUE;
     case GDK_KEY_F8:
@@ -1365,8 +1376,11 @@ void nes_debugger_show(GtkWindow *parent, nessession *session)
         const char *tab = g_getenv("NES_DEBUGGER_TAB");
         if (tab && *tab) gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), atoi(tab));
     }
+    nes_help_set_context(w->win, k_tab_contexts[gtk_notebook_get_current_page(GTK_NOTEBOOK(notebook)) > 0
+                                                  ? gtk_notebook_get_current_page(GTK_NOTEBOOK(notebook)) : 0]);
 
     header = adw_header_bar_new();
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), nes_help_button(NULL));
     toolbar = adw_toolbar_view_new();
     adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), root);

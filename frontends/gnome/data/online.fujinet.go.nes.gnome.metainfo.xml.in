@@ -22,7 +22,8 @@
       cartridge firmware's own protocol and mapper sources, so it behaves as
       the hardware does. Gamepads are picked up as they are plugged in and
       out, and a native debugger shows the CPU, disassembly with
-      breakpoints, the PPU, the APU and the cartridge.
+      breakpoints, the PPU, the APU and the cartridge. Built-in, searchable
+      Help covers all of it.
     </p>
     <p>
       The Famicom expansion port takes the Family BASIC Keyboard, with its
