@@ -1,1505 +1,3478 @@
 /*
  * Debugger window (Win32) over MesenCE's debugger engine, via
- * core/include/nesdebug.h. Mirrors the GTK and Qt debuggers tab for tab --
- * Prompt, CPU & RAM, Disassembly, PPU, APU & Input, Breakpoints, Cart,
- * FujiNet -- built from plain common controls.
+ * core/include/nesdebug.h. Twelve tabs, the family's: Console (the engine's
+ * prompt), Disassembly, Memory (the CPU bus, PPU bus, palette, OAM, PRG, CHR,
+ * WRAM or console RAM, with Go to, a search and a Poke bar), Breakpoints
+ * (Execute / Read / Write / Access over the CPU, PPU, palette and OAM spaces,
+ * expression conditions), Watches, Cart & I/O, Trace, History, Video (the
+ * shared controller in core/include/nesvidtab.h, drawn by dbg_video.c; the old
+ * PPU panes are its Decoded sources), Sound (the 2A03), Symbols and FujiNet.
+ * An editable register strip sits under every tab (Enter applies, only while
+ * stopped). Built from plain common controls, with the disassembly and the
+ * Video picture drawn by hand.
  *
  * The engine only exists while this window is showing: showing it attaches
- * (which stops the machine, as on every sibling) and hiding it detaches,
- * which lets the machine run on at full speed. The window refreshes on a
- * timer keyed to the engine's generation counter rather than on every tick.
+ * (which stops the machine, as on every sibling) and hiding it (the close
+ * box, F12, or the main window's F12 / View menu item, which toggles it)
+ * turns the trace and history rings off and detaches, which lets the machine
+ * run on at full speed. The toolbar carries a single Stop/Run button, the
+ * stepping controls (Step, Step Over, Step Out, Run to Cursor, Scanline,
+ * Frame), symbol loading, the save menu and Pop Out; F5 F7 F8 Shift+F8
+ * Shift+F7 F9 F12 work wherever the focus is inside the window
+ * (nes_debugger_pretranslate).
+ *
+ * Each tab's controls are children of a container of their own, so Pop Out
+ * can peel the tab off into a window (SetParent) and Dock put it back.
+ *
+ * A 100 ms timer polls the engine (nesdebug_generation and the stop
+ * snapshot, never the stop callback, which fires off the emulation thread) and
+ * refreshes the tabs showing, and only those, when something changed. The
+ * engine is read for a stopped machine: while it runs only the Video picture,
+ * the live Trace and the FujiNet packets move (the engine serialises its
+ * callers, and a power cycle holds them up). Nothing is greyed while the
+ * machine runs: a click in the disassembly selects a row, a register edit
+ * says "stop the machine first" in the status line. After a step the window
+ * waits a few milliseconds for the stop to settle so the status does not
+ * flash "Running".
+ *
+ * Environment hooks, for captures and tests: NES_DEBUGGER_TAB (a tab number,
+ * or the start of a tab's name or label, in any case; the old "prompt", "cpu",
+ * "ppu" and "apu" still work), NES_DEBUGGER_WATCH ("x,y": watches),
+ * NES_DEBUGGER_WATCH_BREAK (a write-when-changed breakpoint on a range),
+ * NES_DEBUGGER_MEM_GOTO (show a range in Memory), NES_DEBUGGER_HISTORY (record
+ * from the start), NES_DEBUGGER_POPOUT (a tab, as for NES_DEBUGGER_TAB) and the
+ * Video tab's NES_DEBUGGER_VIDEO_* (read by nesvid_tab_new).
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "dbg_window.h"
-#include "../help/help_window.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
 #include <windowsx.h>
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "accent.h"
+#include "dbg_video.h"
 #include "nesdebug.h"
+#include "nesmemtools.h"
 
-#define DISASM_WINDOW 48
+#include "resource.h"
+#include "../help/help_window.h"
+
+#define DISASM_MAX 96        /* rows fetched at most; the view shows what fits */
+#define MEM_ROWS 256         /* 4K of memory, 16 bytes a row */
+#define MEM_BYTES (MEM_ROWS * 16)
 #define MAX_BPS 128
-#define TRACE_MAX 512
+#define HISTORY_MAX 64
+#define TRACE_MAX 512        /* FujiNet packets shown */
+#define COMMENT_COL 66       /* where a disassembly line's comment starts, in characters */
+#define CONSOLE_KEEP (256 * 1024)
+#define NOTICE_MS 4000       /* how long a notice holds the status line */
+#define HIST_SHOWN 400       /* lines on the Trace and History tabs */
+#define HIST_COPY 800        /* entries read to find them: a big read pauses the machine */
+#define SYM_MAX 4096         /* symbols listed at most */
+#define SLOW_DEBOUNCE_MS 400 /* the Cart & I/O reads are for a stopped machine: never more often than this */
+#define LIVE_TRACE_TICKS 10  /* a running machine's Trace is read this often (each read pauses it briefly) */
 
-#define WM_DBG_ACCEPT (WM_APP + 2)   /* wp: control id -- Enter in an edit */
-#define WM_DBG_TAB    (WM_APP + 3)   /* Tab in the prompt: complete */
+/* Sizes at 96 dpi; S() scales them to the window's. */
+#define GUTTER_W 18          /* the disassembly's breakpoint column */
+#define MONO_PX 13           /* the monospace font */
+
+/* The icon's red (core/include/nessession.h); the PC line and the stopped
+ * Run button wear it, with the ink on it. */
+#define ACCENT_RGB NES_ACCENT_COLORREF
+#define INK_RGB NES_ACCENT_INK_COLORREF
+
+#define WM_DBG_ACCEPT  (WM_APP + 2)   /* wp: control id -- Enter in an edit */
+#define WM_DBG_TAB     (WM_APP + 3)   /* Tab in the console: complete */
+#define WM_DBG_HISTORY (WM_APP + 4)   /* wp: 0 Up (older), 1 Down (newer) in the console */
+#define WM_DBG_SYNC    (WM_APP + 5)   /* resync once a list's notification is over */
+#define WM_DBG_GOTO    (WM_APP + 6)   /* wp: an address to show in Memory (a symbol was clicked) */
+/* WM_APP + 7 is the Video tab's "Show in Memory" (DBG_VIDEO_SHOW_MEMORY in dbg_video.h) */
 
 #define TIMER_REFRESH 1
 
-enum {
-    PAGE_PROMPT = 0, PAGE_CPU, PAGE_DISASM, PAGE_PPU, PAGE_APU, PAGE_BREAKS, PAGE_CART,
-    PAGE_FUJINET, PAGE_COUNT
-};
+#define DBG_CLASS "FujiNetGoNESDebugger"
+#define DISASM_CLASS "FujiNetGoNESDisasm"
+#define PAGE_CLASS "FujiNetGoNESDbgPage"
+#define POP_CLASS "FujiNetGoNESDbgPop"
 
 enum {
-    IDC_RUN = 1000, IDC_STEP, IDC_OVER, IDC_OUT, IDC_SCAN, IDC_FRAME,
-    IDC_STATUS, IDC_TABS,
-    IDC_PROMPT_OUT, IDC_PROMPT_IN, IDC_LOAD_SYMBOLS, IDC_SAVE, IDC_HELP_BTN,
-    IDC_REG0, IDC_REG_LAST = IDC_REG0 + 5,
-    IDC_FLAG0, IDC_FLAG_LAST = IDC_FLAG0 + 5,
-    IDC_CYCLES, IDC_RAM_VIEW, IDC_RAM_ADDR, IDC_RAM_VAL,
+    TAB_CONSOLE, TAB_DISASM, TAB_MEMORY, TAB_BREAKS, TAB_WATCHES, TAB_CART, TAB_TRACE, TAB_HISTORY,
+    TAB_VIDEO, TAB_SOUND, TAB_SYMBOLS, TAB_FUJINET, TAB_COUNT
+};
+
+/* The tabs, in order: the names NES_DEBUGGER_TAB takes, and their labels
+ * (which it takes too). */
+static const struct { const char *name, *label; } k_tabs[TAB_COUNT] = {
+    { "console", "Console" }, { "disassembly", "Disassembly" }, { "memory", "Memory" },
+    { "breakpoints", "Breakpoints" }, { "watches", "Watches" }, { "cart", "Cart & I/O" },
+    { "trace", "Trace" }, { "history", "History" }, { "video", "Video" }, { "sound", "Sound" },
+    { "symbols", "Symbols" }, { "fujinet", "FujiNet" },
+};
+
+/* The tabs before there were twelve: what they became. */
+static const struct { const char *name; int tab; } k_tab_aliases[] = {
+    { "prompt", TAB_CONSOLE }, { "cpu", TAB_MEMORY }, { "ram", TAB_MEMORY }, { "ppu", TAB_VIDEO },
+    { "apu", TAB_SOUND }, { "input", TAB_CART }, { "io", TAB_CART }, { "i/o", TAB_CART },
+};
+
+#define NREGS 6             /* the editable registers: PC SP A X Y P */
+#define NCHECKS 6           /* the flags N V D I Z C */
+#define NSAVE 5
+#define NBPTYPES 4          /* Execute Read Write Access */
+#define NBPSPACES 4         /* the spaces a breakpoint can watch: CPU PPU Palette OAM */
+
+enum {
+    IDC_RUN = 1000, IDC_STEP, IDC_OVER, IDC_OUT, IDC_RUN_TO, IDC_SCAN, IDC_FRAME, IDC_SYMBOLS, IDC_SAVE,
+    IDC_STATUS, IDC_TABS, IDC_TOGGLE_BP, IDC_HELP_BTN, IDC_POPOUT, IDC_DOCK,
+    IDC_CON_OUT, IDC_CON_PROMPT, IDC_CON_IN,
+    IDC_REG0, IDC_REG_LAST = IDC_REG0 + NREGS - 1,
+    IDC_CHK0, IDC_CHK_LAST = IDC_CHK0 + NCHECKS - 1,
+    IDC_MEM_SPACE, IDC_MEM_VIEW, IDC_MEM_GOTO, IDC_MEM_BACK, IDC_MEM_ON, IDC_MEM_WRITE,
+    IDC_SRCH_KIND, IDC_SRCH_ENTRY, IDC_SRCH_NEXT, IDC_SRCH_PREV,
     IDC_FOLLOW_PC, IDC_JUMP, IDC_DISASM,
-    IDC_PPU_TEXT, IDC_PPU_VIEW, IDC_PPU_PALETTE, IDC_PPU_PIC, IDC_OAM,
-    IDC_APU,
-    IDC_BP_LIST, IDC_BP_TYPE, IDC_BP_START, IDC_BP_END, IDC_BP_COND, IDC_BP_ADD,
-    IDC_BP_REMOVE, IDC_BP_ENABLE, IDC_BP_CLEAR,
-    IDC_CART,
+    IDC_BP_LIST, IDC_BP_REMOVE, IDC_BP_CLEAR, IDC_BP_HITS, IDC_BP_TYPE, IDC_BP_SPACE, IDC_BP_START, IDC_BP_END,
+    IDC_BP_COND, IDC_BP_ADD, IDC_BP_EDIT, IDC_BP_SET,
+    IDC_WT_ENTRY, IDC_WT_ADD, IDC_WT_LIST, IDC_WT_MEM, IDC_WT_BRK, IDC_WT_REMOVE,
+    IDC_CART_TEXT, IDC_IO_TEXT, IDC_SOUND_TEXT,
+    IDC_H_REC0, IDC_H_REC1, IDC_H_FILTER0, IDC_H_FILTER1, IDC_H_RANGE0, IDC_H_RANGE1,
+    IDC_H_CLEAR0, IDC_H_CLEAR1, IDC_H_NOTE0, IDC_H_NOTE1, IDC_H_TEXT0, IDC_H_TEXT1,
+    IDC_SYM_FILTER, IDC_SYM_LIST, IDC_SYM_COUNT,
     IDC_FUJI_NOTE, IDC_FUJI_CLEAR, IDC_FUJI_TEXT, IDC_FUJI_STATE,
-    IDC_SAVE_KIND0, IDC_SAVE_KIND_LAST = IDC_SAVE_KIND0 + 4,
+    IDC_BREAK_AT, IDC_CLEAR_SYMS, IDC_SYM_BREAK, IDC_SYM_MEM,
+    IDC_SAVE_KIND0, IDC_SAVE_KIND_LAST = IDC_SAVE_KIND0 + NSAVE - 1,
     IDC_LABEL_FIRST
 };
 
 typedef struct {
-    HWND hwnd;
-    HWND tabs;
-    HWND run_btn, step_btn, over_btn, out_btn, scan_btn, frame_btn, help_btn, status;
+    HWND hwnd, tabs;
+    HWND run_btn, step_btn, over_btn, out_btn, run_to_btn, scan_btn, frame_btn, sym_btn, save_btn, popout_btn, help_btn, status;
 
-    HWND prompt_out, prompt_in, load_symbols, save;
+    /* a container per tab: its controls are its children, so it can be peeled off into a window */
+    HWND pages[TAB_COUNT];
+    HWND popped[TAB_COUNT];     /* the window a tab lives in, or NULL */
+    int tab_page[TAB_COUNT];    /* the tab at each tab-control index */
+    int ntabs;
+    HWND new_parent;            /* where child() puts the next control; NULL: the window */
 
-    HWND reg_label[6], reg_edit[6], flag[6], cycles, ram_label, ram_view;
-    HWND ram_addr_label, ram_addr, ram_val_label, ram_val;
+    /* the register strip, under every tab */
+    HWND reg_label[NREGS], reg[NREGS], chk[NCHECKS], cpu_hint, beam_label, irq_label;
 
-    HWND follow_pc, jump_label, jump, disasm_hint, disasm;
+    /* console */
+    HWND con_out, con_prompt, con_in;
+    char history[HISTORY_MAX][256];
+    int nhistory, history_pos;
+    uint64_t con_serial;        /* the stop the console last reported */
 
-    HWND ppu_text, ppu_view_label, ppu_view, ppu_pal_label, ppu_palette, ppu_pic, oam;
+    /* memory */
+    HWND mem_title, mem_view, goto_label, mem_goto, mem_back, mem_on, write_label, mem_write;
+    HWND space_label, mem_space;
+    HWND srch_label, srch_kind, srch_entry, srch_next, srch_prev, srch_note;
+    int mem_space_id;           /* the nesdebug_space the dump shows */
+    int mem_top;                /* the dump's first address */
+    int mem_hl;                 /* a range is marked */
+    int mem_hl_lo, mem_hl_hi;
 
-    HWND apu;
+    /* disassembly */
+    HWND follow_pc, jump_label, jump, break_label, break_at, disasm_hint, disasm;
+    int disasm_top;             /* address of the first disassembly line */
+    int selected;               /* the selected line's address, or -1 */
+    nesdebug_line lines[DISASM_MAX];
+    int line_count, pc_line;
 
-    HWND bp_list, bp_type, bp_start_label, bp_start, bp_end_label, bp_end, bp_cond_label, bp_cond;
-    HWND bp_add, bp_remove, bp_enable, bp_clear;
+    /* breakpoints */
+    HWND bp_hint, bp_remove, bp_clear, bp_hits, bp_list, bp_empty;
+    HWND bp_type, bp_space, bp_start, bp_end, bp_cond, bp_add, bp_msg, bp_stop;
+    HWND bp_edit_label, bp_edit, bp_set;
+    nesdebug_breakpoint bps[MAX_BPS];
+    int nbps;
+    char bp_sig[MAX_BPS * 200]; /* what the list shows, to rebuild on change */
+    int bp_sig_ok;
+    int bp_edit_id;             /* the breakpoint whose condition the edit box holds, -1 none */
 
-    HWND cart;
+    /* watches */
+    HWND wt_label, wt_entry, wt_add, wt_list, wt_mem, wt_brk, wt_remove;
 
-    HWND fuji_title, fuji_note, fuji_clear, fuji_text, state_title, fuji_state;
+    /* cart & I/O, sound; the reads behind them are cached (see cache_due) */
+    HWND cart_text, io_text, sound_text;
+    char cart_buf[4096];            /* nesdebug_cart_info + nesdebug_cart_text */
+    char io_buf[8192];              /* what is left of nesdebug_io_text once the cart text is taken off */
+    int cart_valid, cart_dirty;
+    uint64_t cart_serial;
+    DWORD cart_stamp;
+    nesdebug_region mem_map[24];
+    int mem_map_count, mem_map_valid, mem_map_dirty;
+    uint64_t mem_map_serial;
+    DWORD mem_map_stamp;
+
+    /* trace (0, live) and history (1, when stopped) */
+    HWND h_rec[2], h_filter[2], h_range[2], h_clear[2], h_note[2], h_text[2];
+    uint64_t h_seen[2];
+    int h_ticks;
+
+    /* video */
+    HWND video;
+
+    /* symbols */
+    HWND sym_filter_label, sym_filter, sym_count, sym_clear, sym_break, sym_mem, sym_list;
+    uint16_t sym_addr[SYM_MAX]; /* the address of each row shown: row indices outlive the list's own */
+    int sym_lines;
+    char *sym_text;             /* what the list shows, to rebuild on change */
+    char sym_filter_text[64];
+    int sym_ok;
+
+    /* fujinet */
+    HWND fuji_title, fuji_note, fuji_clear, fuji_text, fuji_state_title, fuji_state;
     uint64_t fuji_last;
-    int fuji_count;
+    int fuji_count, fuji_ticks;
 
-    HFONT mono, ui;
-    int mono_h;               /* a line of the monospace font */
+    HWND views[40];             /* the read-only text views, drawn on the window colour */
+    int nviews;
+    HWND dim[96];               /* captions and hints, drawn grey */
+    int ndim, nlabels;
+
+    HFONT ui_font, ui_bold, mono;
+    int dpi;
+    int mono_w, mono_h, line_h;
     HACCEL accel;
-    HBRUSH accent;
+    HBRUSH accent, bp_on, bp_off;
 
     nessession *session;
     nesdebug *dbg;
 
     int page;
     unsigned seen_gen;
+    uint64_t seen_serial;
     int was_stopped;
     int running_ticks;
-    int fuji_ticks;
+    int updating;               /* a refresh is setting controls */
 
-    int disasm_top;            /* address of the first disassembly line */
-    uint16_t line_addr[DISASM_WINDOW];
-    int line_count;
-    int pc_line;
-
-    nesdebug_breakpoint bps[MAX_BPS];
-    int nbps;
-
-    uint32_t *pic_px;
-    int pic_w, pic_h;
+    char notice[200];           /* a message holding the status line a moment */
+    DWORD notice_until;
 } debugger;
 
 static debugger *g_dbg;
 
-static const char *const kSaveKinds[5] = { "dis", "prg", "chr", "ram", "wram" };
-static const char *const kSaveTitles[5] = { "Disassembly ($8000-$FFFF)...", "PRG SRAM...", "CHR SRAM...",
-                                            "Console RAM...", "Cartridge WRAM..." };
+/* The editable registers, in the order the strip lays them out. */
+static const char *const k_reg_names[NREGS] = { "PC", "SP", "A", "X", "Y", "P" };
+static const char *const k_reg_ids[NREGS] = { "pc", "sp", "a", "x", "y", "ps" };
+
+/* The check boxes: the flags in P. */
+static const char *const k_chk_names[NCHECKS] = { "N", "V", "D", "I", "Z", "C" };
+static const char *const k_chk_ids[NCHECKS] = { "n", "v", "d", "i", "z", "c" };
+
+static const char *const k_save_kinds[NSAVE] = { "dis", "prg", "chr", "ram", "wram" };
+static const char *const k_save_titles[NSAVE] = { "Disassembly ($8000-$FFFF)...", "PRG SRAM...", "CHR SRAM...",
+                                                  "Console RAM...", "Cartridge WRAM..." };
+
+static const char *const k_bp_types[NBPTYPES] = { "Execute", "Read", "Write", "Access" };
+static const int k_bp_type_ids[NBPTYPES] = { NESDEBUG_BP_EXEC, NESDEBUG_BP_READ, NESDEBUG_BP_WRITE, NESDEBUG_BP_ACCESS };
+static const int k_bp_space_ids[NBPSPACES] = { NESDEBUG_SPACE_CPU, NESDEBUG_SPACE_PPU, NESDEBUG_SPACE_PALETTE, NESDEBUG_SPACE_OAM };
 
 /* ---- helpers ---------------------------------------------------------------- */
 
-static void set_text(HWND h, const char *text) { SetWindowTextA(h, text); }
+static void edit_text(HWND hwnd, char *out, int outsz) { GetWindowTextA(hwnd, out, outsz); }
 
-/* EDIT controls want CRLF and render control characters as boxes. */
-static char *to_crlf(const char *text)
+static void wide(const char *utf8, wchar_t *out, int outn)
 {
-    size_t n = strlen(text), i, o = 0;
-    char *buf = malloc(n * 2 + 1);
+    if (outn <= 0) return;
+    out[0] = 0;
+    if (utf8 && MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out, outn) <= 0) out[0] = 0;
+    out[outn - 1] = 0;
+}
+
+/* A label set only when it changed (no flicker on the live refresh). */
+static void set_label(HWND hwnd, const char *utf8)
+{
+    wchar_t cur[512], wtext[512];
+    wide(utf8, wtext, 512);
+    GetWindowTextW(hwnd, cur, 512);
+    if (wcscmp(cur, wtext) != 0) SetWindowTextW(hwnd, wtext);
+}
+
+/* EDIT controls want CR LF and draw control characters as boxes: engine
+ * text (UTF-8) as the wide text a view shows. */
+static wchar_t *wide_view_text(const char *text)
+{
+    size_t num = strlen(text), idx, outbuf = 0;
+    char *buf = malloc(num * 2 + 1);
+    wchar_t *wtext = NULL;
+    int wn;
     if (!buf) return NULL;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (c == '\n') { buf[o++] = '\r'; buf[o++] = '\n'; }
-        else if (c >= 0x20 || c == '\t') buf[o++] = (char)c;
+    for (idx = 0; idx < num; idx++) {
+        unsigned char cur = (unsigned char)text[idx];
+        if (cur == '\n') { buf[outbuf++] = '\r'; buf[outbuf++] = '\n'; }
+        else if (cur >= 0x20 || cur == '\t') buf[outbuf++] = (char)cur;
     }
-    buf[o] = '\0';
-    return buf;
-}
-
-static void set_text_lf(HWND h, const char *text)
-{
-    char *buf = to_crlf(text);
-    set_text(h, buf ? buf : text);
+    buf[outbuf] = '\0';
+    wn = MultiByteToWideChar(CP_UTF8, 0, buf, -1, NULL, 0);
+    if (wn > 0 && (wtext = malloc((size_t)wn * sizeof *wtext)) != NULL)
+        MultiByteToWideChar(CP_UTF8, 0, buf, -1, wtext, wn);
     free(buf);
-}
-
-static void append_text_lf(HWND h, const char *text)
-{
-    char *buf = to_crlf(text);
-    int len;
-    if (!buf) return;
-    len = GetWindowTextLengthA(h);
-    SendMessageA(h, EM_SETSEL, (WPARAM)len, (LPARAM)len);
-    SendMessageA(h, EM_REPLACESEL, FALSE, (LPARAM)buf);
-    SendMessageA(h, EM_SCROLLCARET, 0, 0);
-    free(buf);
-}
-
-static void edit_text(HWND h, char *out, int outsz) { GetWindowTextA(h, out, outsz); }
-
-/* Labels the live refresh rewrites: only on a change, or they flicker. */
-static void set_label(HWND h, const char *text)
-{
-    char cur[256];
-    GetWindowTextA(h, cur, sizeof cur);
-    if (strcmp(cur, text) != 0) SetWindowTextA(h, text);
+    return wtext;
 }
 
 static size_t addf(char *s, size_t len, size_t cap, const char *fmt, ...)
 {
     va_list ap;
-    int n;
+    int num;
     if (len >= cap) return len;
     va_start(ap, fmt);
-    n = vsnprintf(s + len, cap - len, fmt, ap);
+    num = vsnprintf(s + len, cap - len, fmt, ap);
     va_end(ap);
-    if (n < 0) return len;
-    return len + (size_t)n < cap ? len + (size_t)n : cap - 1;
+    if (num < 0) return len;
+    return len + (size_t)num < cap ? len + (size_t)num : cap - 1;
 }
 
-/* ---- the FujiNet views: UTF-8 text in Unicode EDIT controls -------------------- */
-
-/* CR LF, control characters dropped, then UTF-16: the packet lines carry
- * arrows and a multiplication sign. */
-static wchar_t *wide_view_text(const char *text)
+/* Blanks off both ends, in place. */
+static char *strip(char *s)
 {
-    size_t n = strlen(text), i, o = 0;
-    char *buf = malloc(n * 2 + 1);
-    wchar_t *w = NULL;
-    int wn;
-    if (!buf) return NULL;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (c == '\n') { buf[o++] = '\r'; buf[o++] = '\n'; }
-        else if (c >= 0x20 || c == '\t') buf[o++] = (char)c;
-    }
-    buf[o] = '\0';
-    wn = MultiByteToWideChar(CP_UTF8, 0, buf, -1, NULL, 0);
-    if (wn > 0 && (w = malloc((size_t)wn * sizeof *w)) != NULL)
-        MultiByteToWideChar(CP_UTF8, 0, buf, -1, w, wn);
-    free(buf);
-    return w;
+    char *e;
+    while (*s == ' ' || *s == '\t') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = '\0';
+    return s;
 }
+
+/* $hex, 0xhex, hexh, #dec, or bare hex, as the console reads numbers. */
+static int parse_num(const char *text, long *out)
+{
+    char buf[64];
+    const char *ptr;
+    char *end;
+    long val;
+    int base = 16;
+
+    snprintf(buf, sizeof buf, "%s", text);
+    ptr = buf;
+    while (*ptr == ' ' || *ptr == '\t') ptr++;
+    if (*ptr == '$') ptr++;
+    else if (ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X')) ptr += 2;
+    else if (*ptr == '#') { ptr++; base = 10; }
+    if (!*ptr) return 0;
+    val = strtol(ptr, &end, base);
+    if (base == 16 && (*end == 'h' || *end == 'H')) end++;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') end++;
+    if (end == ptr || *end) return 0;
+    *out = val;
+    return 1;
+}
+
+/* A label, or a number; -1 when it is neither. */
+static int resolve_addr(debugger *dbgwin, const char *text)
+{
+    long val;
+    int addr = -1;
+    const char *ptr = text;
+    while (*ptr == ' ') ptr++;
+    if (!*ptr) return -1;
+    if (*ptr != '$' && *ptr != '#' && !(ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X')))
+        addr = nesdebug_label_address(dbgwin->dbg, ptr);
+    if (addr < 0 && parse_num(ptr, &val) && val >= 0 && val <= 0xffff) addr = (int)val;
+    if (addr < 0) {
+        char err[96];
+        if (nesdebug_eval(dbgwin->dbg, ptr, &val, err, (int)sizeof err) == 0 && val >= 0 && val <= 0xffff) addr = (int)val;
+    }
+    return addr;
+}
+
+static const char *base_name(const char *path)
+{
+    const char *start_text = strrchr(path, '\\'), *end_text = strrchr(path, '/');
+    if (end_text && (!start_text || end_text > start_text)) start_text = end_text;
+    return start_text ? start_text + 1 : path;
+}
+
+
+/* ---- scale and fonts --------------------------------------------------------- */
+
+static int system_dpi(void)
+{
+    HDC dc = GetDC(NULL);
+    int val = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(NULL, dc);
+    return val > 0 ? val : 96;
+}
+
+/* The window's DPI (Windows 10 1607+), else the system's. */
+static int window_dpi(HWND hwnd)
+{
+    typedef UINT (WINAPI *dpi_fn)(HWND);
+    static dpi_fn fn;
+    static int looked;
+    if (!looked) {
+        HMODULE user = GetModuleHandleA("user32.dll");
+        fn = user ? (dpi_fn)(void (*)(void))GetProcAddress(user, "GetDpiForWindow") : NULL;
+        looked = 1;
+    }
+    if (fn && hwnd) {
+        const UINT val = fn(hwnd);
+        if (val) return (int)val;
+    }
+    return system_dpi();
+}
+
+/* High-contrast themes: the accent fills give way to the system's selection colours. */
+static int high_contrast(void)
+{
+    HIGHCONTRASTA hc;
+    memset(&hc, 0, sizeof hc);
+    hc.cbSize = sizeof hc;
+    return SystemParametersInfoA(SPI_GETHIGHCONTRAST, sizeof hc, &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+static int scaled(const debugger *dbgwin, int val) { return MulDiv(val, dbgwin->dpi, 96); }
+
+/* The message font at dpi (system metrics come at the system DPI), at its
+ * own size (px 0) or px pixels at 96 dpi; face NULL keeps the message
+ * font's, otherwise a fixed-pitch face (Consolas). */
+static HFONT make_font(int dpi, int page_x, int weight, const char *face)
+{
+    NONCLIENTMETRICSA ncm;
+    LOGFONTA lf;
+    ZeroMemory(&ncm, sizeof ncm);
+    ncm.cbSize = sizeof ncm;
+    if (SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0))
+        lf = ncm.lfMessageFont;
+    else
+        GetObjectA(GetStockObject(DEFAULT_GUI_FONT), sizeof lf, &lf);
+    if (page_x > 0) lf.lfHeight = -MulDiv(page_x, dpi, 96);
+    else lf.lfHeight = -MulDiv(abs(lf.lfHeight ? lf.lfHeight : 12), dpi, system_dpi());
+    lf.lfWidth = 0;
+    lf.lfWeight = weight;
+    if (face) {
+        snprintf(lf.lfFaceName, sizeof lf.lfFaceName, "%s", face);
+        lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+    }
+    return CreateFontIndirectA(&lf);
+}
+
+static BOOL CALLBACK refont_child(HWND hwnd, LPARAM lparam)
+{
+    const HFONT *map = (const HFONT *)lparam;     /* old ui, bold, mono; new ui, bold, mono */
+    const HFONT f = (HFONT)SendMessageA(hwnd, WM_GETFONT, 0, 0);
+    int idx;
+    for (idx = 0; idx < 3; idx++)
+        if (f && f == map[idx]) SendMessageA(hwnd, WM_SETFONT, (WPARAM)map[idx + 3], TRUE);
+    return TRUE;
+}
+
+/* The message font and Consolas at the window's DPI; the controls already
+ * made take the new ones. */
+static void make_fonts(debugger *dbgwin)
+{
+    HFONT old[3] = { dbgwin->ui_font, dbgwin->ui_bold, dbgwin->mono };
+    HDC dc;
+    TEXTMETRICA tm;
+    HGDIOBJ prev;
+    int idx;
+
+    dbgwin->ui_font = make_font(dbgwin->dpi, 0, FW_NORMAL, NULL);
+    dbgwin->ui_bold = make_font(dbgwin->dpi, 0, FW_BOLD, NULL);
+    dbgwin->mono = make_font(dbgwin->dpi, MONO_PX, FW_NORMAL, "Consolas");
+
+    /* the monospace cell, for the hand-drawn views */
+    dc = GetDC(dbgwin->hwnd);
+    prev = SelectObject(dc, dbgwin->mono);
+    dbgwin->mono_w = scaled(dbgwin, 7);
+    dbgwin->mono_h = scaled(dbgwin, 15);
+    if (GetTextMetricsA(dc, &tm)) {
+        dbgwin->mono_w = tm.tmAveCharWidth;
+        dbgwin->mono_h = tm.tmHeight;
+    }
+    dbgwin->line_h = dbgwin->mono_h + scaled(dbgwin, 2);
+    SelectObject(dc, prev);
+    ReleaseDC(dbgwin->hwnd, dc);
+
+    if (old[0]) {
+        HFONT map[6] = { old[0], old[1], old[2], dbgwin->ui_font, dbgwin->ui_bold, dbgwin->mono };
+        EnumChildWindows(dbgwin->hwnd, refont_child, (LPARAM)map);
+    }
+    for (idx = 0; idx < 3; idx++)
+        if (old[idx]) DeleteObject(old[idx]);
+}
+
+static int text_w(debugger *dbgwin, HFONT f, const char *text)
+{
+    HDC dc = GetDC(dbgwin->hwnd);
+    HGDIOBJ old = SelectObject(dc, f);
+    SIZE sz = { 0, 0 };
+    GetTextExtentPoint32A(dc, text, (int)strlen(text), &sz);
+    SelectObject(dc, old);
+    ReleaseDC(dbgwin->hwnd, dc);
+    return sz.cx;
+}
+
+static int btn_w(debugger *dbgwin, const char *text)
+{
+    const int wtext = text_w(dbgwin, dbgwin->ui_font, text) + scaled(dbgwin, 24);
+    return wtext < scaled(dbgwin, 64) ? scaled(dbgwin, 64) : wtext;
+}
+
+static int in_list(HWND hwnd, const HWND *list, int num)
+{
+    int idx;
+    for (idx = 0; idx < num; idx++)
+        if (list[idx] == hwnd) return 1;
+    return 0;
+}
+
+/* ---- the text views ------------------------------------------------------------ */
 
 /* The rows an EDIT view shows. */
-static int edit_rows(debugger *d, HWND h)
+static int edit_rows(debugger *dbgwin, HWND hwnd)
 {
-    RECT c;
-    GetClientRect(h, &c);
-    return d->mono_h > 0 && c.bottom > d->mono_h ? c.bottom / d->mono_h : 1;
+    RECT cur;
+    GetClientRect(hwnd, &cur);
+    return dbgwin->mono_h > 0 && cur.bottom > dbgwin->mono_h ? cur.bottom / dbgwin->mono_h : 1;
 }
 
-/* Logs follow their end while their reader is there. */
-static int edit_at_end(debugger *d, HWND h)
+/* Whether a log's reader is at its end (it then follows new lines). */
+static int edit_at_end(debugger *dbgwin, HWND hwnd)
 {
-    const int first = (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0);
-    const int count = (int)SendMessageW(h, EM_GETLINECOUNT, 0, 0);
-    return first + edit_rows(d, h) >= count;
+    const int first = (int)SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
+    const int count = (int)SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0);
+    return first + edit_rows(dbgwin, hwnd) >= count;
 }
 
-static void edit_to_end(HWND h)
+static void edit_to_end(HWND hwnd)
 {
-    SendMessageW(h, EM_LINESCROLL, 0, SendMessageW(h, EM_GETLINECOUNT, 0, 0));
+    SendMessageW(hwnd, EM_LINESCROLL, 0, SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0));
 }
 
-static void edit_scroll_to(HWND h, int first)
+static void edit_scroll_to(HWND hwnd, int first)
 {
-    SendMessageW(h, EM_LINESCROLL, 0, first - (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0));
+    SendMessageW(hwnd, EM_LINESCROLL, 0, first - (int)SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0));
 }
 
 /* Replaces a view's text where the reader left it (a refresh must not throw
  * a scrolled view back to its top), or, following, at its end. */
-static void set_text_at(HWND h, const char *text, int follow)
+static void set_text_at(HWND hwnd, const char *text, int follow)
 {
-    const int first = (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0);
-    wchar_t *w = wide_view_text(text);
-    if (!w) return;
-    SendMessageW(h, WM_SETREDRAW, FALSE, 0);
-    SetWindowTextW(h, w);
-    if (follow) edit_to_end(h);
-    else edit_scroll_to(h, first);
-    SendMessageW(h, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(h, NULL, TRUE);
-    free(w);
+    const int first = (int)SendMessageW(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
+    wchar_t *wtext = wide_view_text(text);
+    if (!wtext) return;
+    SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(hwnd, wtext);
+    if (follow) edit_to_end(hwnd);
+    else edit_scroll_to(hwnd, first);
+    SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hwnd, NULL, TRUE);
+    free(wtext);
 }
 
-/* $hex, 0xhex, #dec, or bare hex, as the prompt reads numbers. */
-static int parse_num(const char *text, long *out)
-{
-    char buf[64];
-    const char *p;
-    char *end;
-    long v;
-    int base = 16;
+static void refresh_status(debugger *dbgwin);
 
-    snprintf(buf, sizeof buf, "%s", text);
-    p = buf;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '$') p++;
-    else if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
-    else if (*p == '#') { p++; base = 10; }
-    if (!*p) return 0;
-    v = strtol(p, &end, base);
-    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') end++;
-    if (*end) return 0;
-    *out = v;
-    return 1;
+static int notice_showing(debugger *dbgwin)
+{
+    return dbgwin->notice[0] && (LONG)(GetTickCount() - dbgwin->notice_until) < 0;
 }
 
-static int resolve_addr(debugger *d, const char *text)
+/* The other frontends' toasts: the message holds the status line a moment. */
+static void toast(debugger *dbgwin, const char *msg)
 {
-    long v;
-    int addr = -1;
-    const char *p = text;
-    while (*p == ' ') p++;
-    if (!*p) return -1;
-    if (*p != '$' && *p != '#' && !(p[0] == '0' && (p[1] == 'x' || p[1] == 'X')))
-        addr = nesdebug_label_address(d->dbg, p);
-    if (addr < 0 && parse_num(p, &v) && v >= 0 && v <= 0xffff) addr = (int)v;
-    return addr;
+    snprintf(dbgwin->notice, sizeof dbgwin->notice, "%s", msg);
+    dbgwin->notice_until = GetTickCount() + NOTICE_MS;
+    refresh_status(dbgwin);
+}
+
+/* ---- the console ---------------------------------------------------------------- */
+
+/* Long sessions keep the last CONSOLE_KEEP characters, whole lines. */
+static void console_trim(debugger *dbgwin)
+{
+    const int len = GetWindowTextLengthW(dbgwin->con_out);
+    wchar_t *all, *nl;
+    int cut;
+    if (len <= CONSOLE_KEEP) return;
+    all = malloc(((size_t)len + 1) * sizeof *all);
+    if (!all) return;
+    GetWindowTextW(dbgwin->con_out, all, len + 1);
+    cut = len - CONSOLE_KEEP * 3 / 4;
+    nl = wcschr(all + cut, L'\n');
+    if (nl) cut = (int)(nl - all) + 1;
+    free(all);
+    SendMessageW(dbgwin->con_out, EM_SETSEL, 0, (LPARAM)cut);
+    SendMessageW(dbgwin->con_out, EM_REPLACESEL, FALSE, (LPARAM)L"");
+}
+
+/* Onto the console's transcript, which follows its end only while the
+ * reader is there. */
+static void console_append(debugger *dbgwin, const char *text)
+{
+    const int follow = edit_at_end(dbgwin, dbgwin->con_out);
+    const int first = (int)SendMessageW(dbgwin->con_out, EM_GETFIRSTVISIBLELINE, 0, 0);
+    wchar_t *wtext = wide_view_text(text);
+    int len;
+    if (!wtext) return;
+    len = GetWindowTextLengthW(dbgwin->con_out);
+    SendMessageW(dbgwin->con_out, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+    SendMessageW(dbgwin->con_out, EM_REPLACESEL, FALSE, (LPARAM)wtext);
+    free(wtext);
+    console_trim(dbgwin);
+    if (follow) edit_to_end(dbgwin->con_out);
+    else edit_scroll_to(dbgwin->con_out, first);
+}
+
+/* Command output, ended with a newline. */
+static void console_output(debugger *dbgwin, const char *text)
+{
+    const size_t num = strlen(text);
+    if (!num) return;
+    console_append(dbgwin, text);
+    if (text[num - 1] != '\n') console_append(dbgwin, "\n");
+}
+
+/* Messages from Load Symbols and Save land in the console and, since it may
+ * not be the tab showing, on the status line. */
+static void say(debugger *dbgwin, const char *msg)
+{
+    console_output(dbgwin, msg);
+    toast(dbgwin, msg);
+}
+
+
+/* ---- the registers ----------------------------------------------------------- */
+
+static void cpu_load(nesdebug *engine, nesdebug_cpu *out)
+{
+    memset(out, 0, sizeof *out);
+    nesdebug_cpu_get(engine, out);
 }
 
 /* ---- refreshers -------------------------------------------------------------- */
 
-static void refresh_status(debugger *d)
+static int page_visible(debugger *dbgwin, int page);
+
+static void refresh_status(debugger *dbgwin)
 {
-    char reason[160], buf[220];
-    int addr;
-    const int stopped = nesdebug_is_stopped(d->dbg);
-    nesdebug_stop_reason(d->dbg, reason, sizeof reason, &addr);
-    if (stopped) snprintf(buf, sizeof buf, "Stopped%s%s", reason[0] ? ": " : "", reason);
-    else snprintf(buf, sizeof buf, "Running");
-    set_text(d->status, buf);
-    set_text(d->run_btn, stopped ? "Run (F5)" : "Stop (F5)");
-    InvalidateRect(d->run_btn, NULL, FALSE);
+    nesdebug_snapshot snap;
+    char text[260];
+    const int stopped = nesdebug_stop_snapshot(dbgwin->dbg, &snap) != 0;
+
+    if (notice_showing(dbgwin)) {
+        snprintf(text, sizeof text, "%s", dbgwin->notice);
+    } else if (stopped) {
+        snprintf(text, sizeof text, "Stopped: %s", snap.text);
+    } else {
+        snprintf(text, sizeof text, "Running");
+    }
+    set_label(dbgwin->status, text);
+    set_label(dbgwin->run_btn, stopped ? "Run (F5)" : "Stop (F5)");
+    InvalidateRect(dbgwin->run_btn, NULL, FALSE);
+    InvalidateRect(dbgwin->status, NULL, TRUE);
 }
 
-static void refresh_cpu(debugger *d)
+/* The register strip: the machine's values (the stale ones while it runs, a
+ * box being typed in is left alone). */
+static void refresh_cpu(debugger *dbgwin)
 {
-    nesdebug_cpu c;
+    nesdebug_cpu cur;
     char buf[160];
-    int i;
-    nesdebug_cpu_get(d->dbg, &c);
+    int idx;
+    if (!nesdebug_is_stopped(dbgwin->dbg)) return;      /* a running machine is not asked */
+    cpu_load(dbgwin->dbg, &cur);
     {
-        const int v[6] = { c.pc, c.sp, c.a, c.x, c.y, c.ps };
-        for (i = 0; i < 6; i++) {
-            if (GetFocus() == d->reg_edit[i]) continue;   /* do not fight the user's typing */
-            snprintf(buf, sizeof buf, i == 0 ? "%04X" : "%02X", v[i]);
-            set_text(d->reg_edit[i], buf);
+        const int val[NREGS] = { cur.pc, cur.sp, cur.a, cur.x, cur.y, cur.ps };
+        for (idx = 0; idx < NREGS; idx++) {
+            if (GetFocus() == dbgwin->reg[idx]) continue;   /* do not fight the user's typing */
+            snprintf(buf, sizeof buf, idx == 0 ? "%04X" : "%02X", val[idx] & (idx == 0 ? 0xFFFF : 0xFF));
+            set_label(dbgwin->reg[idx], buf);
         }
     }
     {
-        const int flags[6] = { c.n, c.v, c.d, c.i, c.z, c.c };
-        for (i = 0; i < 6; i++)
-            SendMessageA(d->flag[i], BM_SETCHECK, flags[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+        const int on[NCHECKS] = { cur.n, cur.v, cur.d, cur.i, cur.z, cur.c };
+        dbgwin->updating = 1;
+        for (idx = 0; idx < NCHECKS; idx++)
+            SendMessageA(dbgwin->chk[idx], BM_SETCHECK, on[idx] ? BST_CHECKED : BST_UNCHECKED, 0);
+        dbgwin->updating = 0;
     }
-    snprintf(buf, sizeof buf, "cycle %llu   scanline %d   dot %d   frame %u%s%s",
-             (unsigned long long)c.total_cycles, c.scanline, c.dot, c.frame,
-             c.irq ? "   IRQ" : "", c.nmi ? "   NMI" : "");
-    set_text(d->cycles, buf);
+    snprintf(buf, sizeof buf, "Cycle %llu    Scanline %d  Dot %d    Frame %u", (unsigned long long)cur.total_cycles, cur.scanline,
+             cur.dot, (unsigned)cur.frame);
+    set_label(dbgwin->beam_label, buf);
+    snprintf(buf, sizeof buf, "IRQ %s    NMI %s", cur.irq ? "pending" : "-", cur.nmi ? "pending" : "-");
+    set_label(dbgwin->irq_label, buf);
 }
 
-static void refresh_ram(debugger *d)
+/* The engine's memory map, I/O and cart reads mean something only for a
+ * stopped machine, so the window keeps what it read and asks again only for
+ * a new stop (the machine cannot change while it is stopped, and a running
+ * one is shown stale): the first fill always, then never while running, and never more
+ * often than SLOW_DEBOUNCE_MS (a stop inside that gap marks the cache dirty
+ * and the timer comes back for it). Returns 1 when the caller should read now. */
+static int cache_due(debugger *dbgwin, int valid, uint64_t *serial, DWORD *stamp, int *dirty)
 {
-    static uint8_t ram[2048];
-    static char text[2048 / 16 * 80 + 128];
+    const uint64_t now_serial = nesdebug_stop_serial(dbgwin->dbg);
+    const DWORD now = GetTickCount();
+    if (!valid) {
+        *serial = now_serial;
+        *stamp = now;
+        *dirty = 0;
+        return 1;
+    }
+    if (!nesdebug_is_stopped(dbgwin->dbg) || (now_serial == *serial && !*dirty)) return 0;
+    if (now - *stamp < SLOW_DEBOUNCE_MS) {
+        *dirty = 1;
+        return 0;
+    }
+    *serial = now_serial;
+    *stamp = now;
+    *dirty = 0;
+    return 1;
+}
+
+static int cached_memory_map(debugger *dbgwin, nesdebug_region *out, int max)
+{
+    int num;
+    if (cache_due(dbgwin, dbgwin->mem_map_valid, &dbgwin->mem_map_serial, &dbgwin->mem_map_stamp, &dbgwin->mem_map_dirty)) {
+        num = nesdebug_memory_map(dbgwin->dbg, dbgwin->mem_map, 24);
+        dbgwin->mem_map_count = num > 0 ? num : 0;
+        dbgwin->mem_map_valid = 1;
+    }
+    num = dbgwin->mem_map_count < max ? dbgwin->mem_map_count : max;
+    memcpy(out, dbgwin->mem_map, (size_t)num * sizeof out[0]);
+    return num;
+}
+
+/* Where a byte's two hex digits start in a Memory row: "AAAA  " (or six
+ * digits for a big PRG) then three characters a byte, one more after the
+ * eighth. */
+static int mem_hex_col(int addr_digits, int col)
+{
+    return addr_digits + 2 + col * 3 + (col >= 8 ? 1 : 0);
+}
+
+/* The size of the space the Memory tab shows now, 0 when the engine has none. */
+static int mem_space_size(debugger *dbgwin)
+{
+    const int size = nesdebug_space_size(dbgwin->dbg, dbgwin->mem_space_id);
+    return size > 0 ? size : 0;
+}
+
+/* What lives at an address of the PPU bus, for the labels down the dump's side. */
+static const char *ppu_region_name(int addr, char *buf, size_t cap)
+{
+    if (addr < 0x1000) return "pattern table 0";
+    if (addr < 0x2000) return "pattern table 1";
+    snprintf(buf, cap, addr < 0x3000 ? "nametable %d" : "nametable %d (mirror)", ((addr - 0x2000) >> 10) & 3);
+    return buf;
+}
+
+static void refresh_mem(debugger *dbgwin)
+{
+    static uint8_t mem[MEM_BYTES];
+    static char buf[(MEM_ROWS + 1) * 140];
+    static int rowoff[MEM_ROWS + 1];    /* each row's first character in the control (CR LF counted) */
+    nesdebug_region map[24];
+    char region[96], last_region[96], scratch[48];
     size_t len = 0;
-    int row, col;
-    nesdebug_ram_get(d->dbg, ram);
-    len += (size_t)snprintf(text + len, sizeof text - len,
-                            "        0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F\r\n");
-    for (row = 0; row < 2048 / 16; row++) {
-        len += (size_t)snprintf(text + len, sizeof text - len, "$%04X: ", row * 16);
-        for (col = 0; col < 16; col++)
-            len += (size_t)snprintf(text + len, sizeof text - len, "%02X ", ram[row * 16 + col]);
-        len += (size_t)snprintf(text + len, sizeof text - len, "\r\n");
+    int row, col, nmap = 0, size = mem_space_size(dbgwin), have, rows, digits;
+
+    if (size <= 0) {
+        set_text_at(dbgwin->mem_view, "(this space has nothing in it: no machine, or no cartridge memory of this kind)", 0);
+        return;
     }
-    {
-        /* keep the scroll position across a refresh */
-        int first = (int)SendMessageA(d->ram_view, EM_GETFIRSTVISIBLELINE, 0, 0);
-        set_text(d->ram_view, text);
-        SendMessageA(d->ram_view, EM_LINESCROLL, 0, first);
+    if (dbgwin->mem_top >= size) dbgwin->mem_top = (size - 1) & ~0xF;
+    if (dbgwin->mem_top < 0) dbgwin->mem_top = 0;
+    memset(mem, 0, sizeof mem);
+    have = size - dbgwin->mem_top;
+    if (have > MEM_BYTES) have = MEM_BYTES;
+    nesdebug_read_space(dbgwin->dbg, dbgwin->mem_space_id, (uint32_t)dbgwin->mem_top, mem, have);
+    rows = (have + 15) / 16;
+    digits = size > 0x10000 ? 6 : 4;
+    if (dbgwin->mem_space_id == NESDEBUG_SPACE_CPU) {
+        nmap = cached_memory_map(dbgwin, map, 24);
+        if (nmap < 0) nmap = 0;
+    }
+    last_region[0] = '\0';
+    len = addf(buf, len, sizeof buf, "%*s", digits + 2, "");
+    for (col = 0; col < 16; col++)
+        len = addf(buf, len, sizeof buf, col == 8 ? " %X  " : "%X  ", col);
+    len = addf(buf, len, sizeof buf, "\n");
+    for (row = 0; row < rows; row++) {
+        const uint8_t *bytes = mem + row * 16;
+        const int addr = dbgwin->mem_top + row * 16;
+        const int in_row = have - row * 16 < 16 ? have - row * 16 : 16;
+        rowoff[row] = (int)len + row + 1;
+        len = addf(buf, len, sizeof buf, "%0*X  ", digits, addr);
+        for (col = 0; col < 16; col++) {
+            if (col < in_row) len = addf(buf, len, sizeof buf, col == 8 ? " %02X " : "%02X ", bytes[col]);
+            else len = addf(buf, len, sizeof buf, col == 8 ? "    " : "   ");
+        }
+        len = addf(buf, len, sizeof buf, " ");
+        for (col = 0; col < in_row; col++)
+            len = addf(buf, len, sizeof buf, "%c", bytes[col] >= 0x20 && bytes[col] < 0x7F ? bytes[col] : '.');
+        /* what is there, on the first row of each run */
+        region[0] = '\0';
+        if (dbgwin->mem_space_id == NESDEBUG_SPACE_CPU)
+            nesmem_region_name(map, nmap, (uint16_t)addr, region, (int)sizeof region);
+        else if (dbgwin->mem_space_id == NESDEBUG_SPACE_PPU)
+            snprintf(region, sizeof region, "%s", ppu_region_name(addr, scratch, sizeof scratch));
+        else if (dbgwin->mem_space_id == NESDEBUG_SPACE_PALETTE)
+            snprintf(region, sizeof region, "%s", addr < 16 ? "background palettes" : "sprite palettes");
+        else if (dbgwin->mem_space_id == NESDEBUG_SPACE_OAM)
+            snprintf(region, sizeof region, "sprites %d-%d", addr / 4, (addr + 15) / 4);
+        if (region[0] && strcmp(region, last_region) != 0) len = addf(buf, len, sizeof buf, "  ; %s", region);
+        snprintf(last_region, sizeof last_region, "%s", region);
+        len = addf(buf, len, sizeof buf, "\n");
+    }
+    set_text_at(dbgwin->mem_view, buf, 0);
+
+    /* the bytes Go to, a search hit or a watch found stay selected across refreshes */
+    if (dbgwin->mem_hl && dbgwin->mem_hl_hi >= dbgwin->mem_top && dbgwin->mem_hl_lo < dbgwin->mem_top + have) {
+        const int first = dbgwin->mem_hl_lo > dbgwin->mem_top ? dbgwin->mem_hl_lo : dbgwin->mem_top;
+        const int last = dbgwin->mem_hl_hi < dbgwin->mem_top + have - 1 ? dbgwin->mem_hl_hi : dbgwin->mem_top + have - 1;
+        const int first_row = (first - dbgwin->mem_top) / 16, last_row = (last - dbgwin->mem_top) / 16;
+        const int top_line = (int)SendMessageW(dbgwin->mem_view, EM_GETFIRSTVISIBLELINE, 0, 0);
+        SendMessageW(dbgwin->mem_view, EM_SETSEL, (WPARAM)(rowoff[first_row] + mem_hex_col(digits, (first - dbgwin->mem_top) % 16)),
+                     (LPARAM)(rowoff[last_row] + mem_hex_col(digits, (last - dbgwin->mem_top) % 16) + 2));
+        edit_scroll_to(dbgwin->mem_view, top_line);
     }
 }
 
-static void refresh_disasm(debugger *d)
+/* The Memory tab's cue banners follow its space. */
+static void mem_cues(debugger *dbgwin)
 {
-    static nesdebug_line lines[DISASM_WINDOW];
-    nesdebug_cpu c;
-    int pc_line = -1, n, i;
-    char *text;
-    size_t cap = DISASM_WINDOW * 200, len = 0;
-    const int follow = SendMessageA(d->follow_pc, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int cpu = dbgwin->mem_space_id == NESDEBUG_SPACE_CPU;
+    const int big = mem_space_size(dbgwin) > 0x10000;
+    SendMessageW(dbgwin->mem_goto, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)(cpu ? L"C000 / label / C000-C0FF" : big ? L"1F000 / 1F000-1F0FF" : L"2000 / 2000-20FF"));
+    SendMessageW(dbgwin->mem_write, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)(cpu ? L"address value [value...]" : L"offset value [value...]"));
+}
+
+/* Shows bytes lo..hi of the Memory tab's space, selected, the page starting just above them. */
+static void show_in_memory(debugger *dbgwin, int low, int high)
+{
+    char shown[16];
+    int top, size = mem_space_size(dbgwin);
+    if (size <= 0) size = 0x10000;
+    if (low < 0) low = 0;
+    if (low > size - 1) low = size - 1;
+    if (high < low) high = low;
+    if (high > size - 1) high = size - 1;
+    dbgwin->mem_hl = 1;
+    dbgwin->mem_hl_lo = low;
+    dbgwin->mem_hl_hi = high;
+    dbgwin->mem_top = (low > 0x100 ? low - 0x100 : 0) & ~0xF;
+    if (dbgwin->mem_top > size - MEM_BYTES) dbgwin->mem_top = (size - MEM_BYTES > 0 ? size - MEM_BYTES : 0) & ~0xF;
+    snprintf(shown, sizeof shown, size > 0x10000 ? "%06X" : "%04X", low);
+    SetWindowTextA(dbgwin->mem_goto, shown);
+    refresh_mem(dbgwin);
+    /* the row 30% of the way down */
+    top = 1 + (low - dbgwin->mem_top) / 16 - edit_rows(dbgwin, dbgwin->mem_view) * 3 / 10;
+    edit_scroll_to(dbgwin->mem_view, top > 0 ? top : 0);
+}
+
+/* Switches the Memory tab to a space (the combo follows). */
+static void set_mem_space(debugger *dbgwin, int space)
+{
+    if (space < 0 || space >= NESDEBUG_SPACE_COUNT) space = NESDEBUG_SPACE_CPU;
+    if (space == dbgwin->mem_space_id && SendMessageA(dbgwin->mem_space, CB_GETCURSEL, 0, 0) == space) return;
+    dbgwin->mem_space_id = space;
+    dbgwin->mem_top = 0;
+    dbgwin->mem_hl = 0;
+    SendMessageA(dbgwin->mem_space, CB_SETCURSEL, (WPARAM)space, 0);
+    mem_cues(dbgwin);
+    refresh_mem(dbgwin);
+}
+
+/* The disassembly rows the view has room for. */
+static int disasm_rows(debugger *dbgwin)
+{
+    RECT cur;
+    int rows;
+    if (!dbgwin->disasm || dbgwin->line_h <= 0) return 1;
+    GetClientRect(dbgwin->disasm, &cur);
+    rows = (cur.bottom - cur.top) / dbgwin->line_h;
+    if (rows < 1) rows = 1;
+    if (rows > DISASM_MAX) rows = DISASM_MAX;
+    return rows;
+}
+
+static int row_address(debugger *dbgwin, int addr, int rows)
+{
+    const int start_text = nesdebug_row_address(dbgwin->dbg, (uint16_t)addr, rows);
+    return start_text < 0 ? addr : start_text & 0xFFFF;
+}
+
+static void refresh_disasm(debugger *dbgwin)
+{
+    int pc_line = -1;
+    const int rows = disasm_rows(dbgwin);
+    const int follow = SendMessageA(dbgwin->follow_pc, BM_GETCHECK, 0, 0) == BST_CHECKED;
 
     if (follow) {
-        nesdebug_cpu_get(d->dbg, &c);
-        d->disasm_top = nesdebug_row_address(d->dbg, (uint16_t)c.pc, -(DISASM_WINDOW / 3));
+        /* the PC a third of the way down, so what led to it shows too */
+        nesdebug_cpu cur;
+        cpu_load(dbgwin->dbg, &cur);
+        dbgwin->disasm_top = row_address(dbgwin, cur.pc & 0xFFFF, -(rows / 3));
     }
-    n = nesdebug_disassemble(d->dbg, (uint16_t)d->disasm_top, lines, DISASM_WINDOW, &pc_line);
+    dbgwin->line_count = nesdebug_disassemble(dbgwin->dbg, (uint16_t)dbgwin->disasm_top, dbgwin->lines, rows, &pc_line);
+    if (dbgwin->line_count < 0) dbgwin->line_count = 0;
+    dbgwin->pc_line = pc_line;
+    InvalidateRect(dbgwin->disasm, NULL, FALSE);
+}
 
+static const char *bp_kind(const nesdebug_breakpoint *bpt, char *buf)
+{
+    buf[0] = '\0';
+    if (bpt->type == NESDEBUG_BP_ACCESS) strcpy(buf, "access");
+    else {
+        if (bpt->type & NESDEBUG_BP_EXEC) strcat(buf, "exec");
+        if (bpt->type & NESDEBUG_BP_READ) strcat(buf, buf[0] ? "/read" : "read");
+        if (bpt->type & NESDEBUG_BP_WRITE) strcat(buf, buf[0] ? "/write" : "write");
+    }
+    if (bpt->space != NESDEBUG_SPACE_CPU) {
+        char name[16], *ptr;
+        snprintf(name, sizeof name, "%s", nesdebug_space_name(bpt->space));
+        for (ptr = name; *ptr; ptr++) *ptr = (char)((*ptr >= 'A' && *ptr <= 'Z') ? *ptr + 32 : *ptr);
+        strcat(buf, " ");
+        strcat(buf, name);
+    }
+    return buf;
+}
+
+static void lv_set(HWND lv, int row, int col, const char *text)
+{
+    wchar_t wtext[256];
+    LVITEMW it;
+    wide(text, wtext, 256);
+    memset(&it, 0, sizeof it);
+    it.iSubItem = col;
+    it.pszText = wtext;
+    SendMessageW(lv, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&it);
+}
+
+/* The list, or (empty) the hint in its place. */
+static void show_bp_list(debugger *dbgwin)
+{
+    const int on = page_visible(dbgwin, TAB_BREAKS);
+    ShowWindow(dbgwin->bp_list, on && dbgwin->nbps > 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(dbgwin->bp_empty, on && dbgwin->nbps == 0 ? SW_SHOW : SW_HIDE);
+}
+
+/* Rebuilt only when something in it changed (each step refreshes), keeping
+ * the selected breakpoint selected. */
+static void refresh_bps(debugger *dbgwin)
+{
+    static char sig[sizeof dbgwin->bp_sig];
+    size_t len = 0;
+    int idx, sel_id = -1;
+    const int sel = (int)SendMessageA(dbgwin->bp_list, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+
+    if (sel >= 0 && sel < dbgwin->nbps) sel_id = dbgwin->bps[sel].id;
+    dbgwin->nbps = nesdebug_breakpoint_list(dbgwin->dbg, dbgwin->bps, MAX_BPS);
+    if (dbgwin->nbps < 0) dbgwin->nbps = 0;
+    sig[0] = '\0';
+    for (idx = 0; idx < dbgwin->nbps; idx++)
+        len = addf(sig, len, sizeof sig, "%d %d %u %d %d %u %u %s\n", dbgwin->bps[idx].id, dbgwin->bps[idx].enabled,
+                   dbgwin->bps[idx].hits, dbgwin->bps[idx].type, dbgwin->bps[idx].space, dbgwin->bps[idx].start, dbgwin->bps[idx].end,
+                   dbgwin->bps[idx].condition);
+    if (dbgwin->bp_sig_ok && strcmp(sig, dbgwin->bp_sig) == 0) { show_bp_list(dbgwin); return; }
+    memcpy(dbgwin->bp_sig, sig, sizeof sig);
+    dbgwin->bp_sig_ok = 1;
+
+    dbgwin->updating = 1;
+    SendMessageA(dbgwin->bp_list, LVM_DELETEALLITEMS, 0, 0);
+    for (idx = 0; idx < dbgwin->nbps; idx++) {
+        const nesdebug_breakpoint *end_text = &dbgwin->bps[idx];
+        const int small = end_text->space == NESDEBUG_SPACE_PALETTE || end_text->space == NESDEBUG_SPACE_OAM;
+        LVITEMA it;
+        char ctl_id[16], kind[40], range[32], hits[24];
+        snprintf(ctl_id, sizeof ctl_id, "#%d", end_text->id);
+        if (end_text->start == end_text->end) snprintf(range, sizeof range, small ? "$%02X" : "$%04X", end_text->start);
+        else snprintf(range, sizeof range, small ? "$%02X-$%02X" : "$%04X-$%04X", end_text->start, end_text->end);
+        snprintf(hits, sizeof hits, "%u", end_text->hits);
+        memset(&it, 0, sizeof it);
+        it.mask = LVIF_TEXT;
+        it.iItem = idx;
+        it.pszText = ctl_id;
+        SendMessageA(dbgwin->bp_list, LVM_INSERTITEMA, 0, (LPARAM)&it);
+        lv_set(dbgwin->bp_list, idx, 1, bp_kind(end_text, kind));
+        lv_set(dbgwin->bp_list, idx, 2, range);
+        lv_set(dbgwin->bp_list, idx, 3, end_text->condition);
+        lv_set(dbgwin->bp_list, idx, 4, hits);
+        memset(&it, 0, sizeof it);
+        it.stateMask = LVIS_STATEIMAGEMASK | LVIS_SELECTED | LVIS_FOCUSED;
+        it.state = INDEXTOSTATEIMAGEMASK(end_text->enabled ? 2 : 1);
+        if (end_text->id == sel_id) it.state |= LVIS_SELECTED | LVIS_FOCUSED;
+        SendMessageA(dbgwin->bp_list, LVM_SETITEMSTATE, (WPARAM)idx, (LPARAM)&it);
+    }
+    dbgwin->updating = 0;
+    show_bp_list(dbgwin);
+}
+
+/* A view's text, replaced only when it changed (an unchanged one keeps its
+ * selection and where the reader scrolled it to). */
+static void set_view(HWND hwnd, const char *text)
+{
+    wchar_t *wtext = wide_view_text(text), *cur;
+    int num;
+    if (!wtext) return;
+    num = GetWindowTextLengthW(hwnd);
+    cur = malloc(((size_t)num + 2) * sizeof *cur);
+    if (cur) {
+        GetWindowTextW(hwnd, cur, num + 1);
+        if (wcscmp(cur, wtext) == 0) {
+            free(cur);
+            free(wtext);
+            return;
+        }
+        free(cur);
+    }
+    free(wtext);
+    set_text_at(hwnd, text, 0);
+}
+
+/* Why the machine stopped, in words, under the breakpoint list. */
+static void refresh_bp_stop(debugger *dbgwin)
+{
+    nesdebug_snapshot snap;
+    char line[260];
+    if (nesdebug_stop_snapshot(dbgwin->dbg, &snap)) snprintf(line, sizeof line, "Stopped: %s", snap.text);
+    else snprintf(line, sizeof line, "Running.");
+    set_label(dbgwin->bp_stop, line);
+}
+
+/* Rebuilt only when a line changed, keeping the selection. */
+static void refresh_watches(debugger *dbgwin)
+{
+    static char last[NESWATCH_MAX * 220];
+    static char now[NESWATCH_MAX * 220];
+    const int num = neswatch_count();
+    const int keep = (int)SendMessageA(dbgwin->wt_list, LB_GETCURSEL, 0, 0);
+    size_t len = 0;
+    int idx;
+
+    now[0] = '\0';
+    for (idx = 0; idx < num; idx++) {
+        char line[200];
+        line[0] = '\0';
+        neswatch_format(dbgwin->dbg, idx, line, (int)sizeof line);
+        len = addf(now, len, sizeof now, "%s\n", line);
+    }
+    if (strcmp(now, last) == 0 && (int)SendMessageA(dbgwin->wt_list, LB_GETCOUNT, 0, 0) == num) return;
+    memcpy(last, now, sizeof last);
+    SendMessageA(dbgwin->wt_list, WM_SETREDRAW, FALSE, 0);
+    SendMessageA(dbgwin->wt_list, LB_RESETCONTENT, 0, 0);
+    for (idx = 0; idx < num; idx++) {
+        char line[200];
+        line[0] = '\0';
+        neswatch_format(dbgwin->dbg, idx, line, (int)sizeof line);
+        SendMessageA(dbgwin->wt_list, LB_ADDSTRING, 0, (LPARAM)line);
+    }
+    if (keep >= 0 && keep < num) SendMessageA(dbgwin->wt_list, LB_SETCURSEL, (WPARAM)keep, 0);
+    SendMessageA(dbgwin->wt_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(dbgwin->wt_list, NULL, TRUE);
+}
+
+/* The cartridge (mapper, banks, mailbox registers), the memory map and the
+ * controllers and lines beside them. The engine's reads mean something only
+ * for a stopped machine: the window keeps what it read and asks again only
+ * after a new stop (see cache_due). */
+static void cart_fetch(debugger *dbgwin)
+{
+    static char io_all[8192];
+    const char *rest;
+    if (!cache_due(dbgwin, dbgwin->cart_valid, &dbgwin->cart_serial, &dbgwin->cart_stamp, &dbgwin->cart_dirty)) return;
+    dbgwin->cart_buf[0] = '\0';
+    nesdebug_cart_text(dbgwin->dbg, dbgwin->cart_buf, (int)sizeof dbgwin->cart_buf);
+    io_all[0] = '\0';
+    nesdebug_io_text(dbgwin->dbg, io_all, (int)sizeof io_all);
+    /* the I/O text opens with the cartridge's own: that part is the left pane's */
+    rest = strstr(io_all, "Controllers");
+    snprintf(dbgwin->io_buf, sizeof dbgwin->io_buf, "%s", rest ? rest : io_all);
+    dbgwin->cart_valid = 1;
+    dbgwin->cart_dirty = 0;
+}
+
+static void refresh_cart(debugger *dbgwin)
+{
+    static char buf[8192];
+    nesdebug_region map[24];
+    size_t len = 0;
+    int idx, num;
+
+    len = addf(buf, len, sizeof buf, "%s\n", dbgwin->cart_buf[0] ? dbgwin->cart_buf : "(no machine)");
+    len = addf(buf, len, sizeof buf, "\nMemory map (as it is mapped now)\n");
+    num = cached_memory_map(dbgwin, map, 24);
+    if (num <= 0) len = addf(buf, len, sizeof buf, "  (no machine)\n");
+    for (idx = 0; idx < num; idx++)
+        len = addf(buf, len, sizeof buf, "  %04X-%04X  %c%c  %s\n", map[idx].low, map[idx].high, map[idx].readable ? 'r' : '-',
+                   map[idx].writable ? 'w' : '-', map[idx].name);
+    set_view(dbgwin->cart_text, buf);
+}
+
+/* The controllers, the expansion port, the CPU's lines, the beam and the PPU's
+ * registers, as the engine words them. */
+static void refresh_io(debugger *dbgwin)
+{
+    set_view(dbgwin->io_text, dbgwin->io_buf[0] ? dbgwin->io_buf : "(no machine)");
+}
+
+/* The 2A03's five channels as a table, and $4015 (stopped only). */
+static void refresh_sound(debugger *dbgwin)
+{
+    static char buf[4096];
+    nesdebug_sound snd;
+    size_t len = 0;
+    int idx;
+
+    if (!nesdebug_is_stopped(dbgwin->dbg)) {
+        set_view(dbgwin->sound_text, "Stop the machine to read the sound channels.");
+        return;
+    }
+    memset(&snd, 0, sizeof snd);
+    if (!nesdebug_sound_get(dbgwin->dbg, &snd) || !snd.present) {
+        set_view(dbgwin->sound_text, "(no machine)");
+        return;
+    }
+    buf[0] = '\0';
+    len = addf(buf, len, sizeof buf, "%-10s %-5s %13s  %-7s %-4s %-4s %-8s %-22s %s\n", "Channel", "State", "Frequency", "Period",
+               "Vol", "Duty", "Length", "Envelope", "Sweep");
+    {
+        const nesdebug_voice *voice[4] = { &snd.pulse1, &snd.pulse2, &snd.triangle, &snd.noise };
+        static const char *const names[4] = { "Pulse 1", "Pulse 2", "Triangle", "Noise" };
+        for (idx = 0; idx < 4; idx++) {
+            const nesdebug_voice *chan = voice[idx];
+            char freq[24], env[40], sweep[40], duty[8], length[16];
+            snprintf(freq, sizeof freq, chan->enabled && chan->hz > 0 ? "%.2f Hz" : "-", chan->hz);
+            snprintf(length, sizeof length, "%d%s", chan->length, chan->length_halt ? " halt" : "");
+            if (idx < 2) snprintf(duty, sizeof duty, "%d", chan->duty); else snprintf(duty, sizeof duty, "-");
+            if (idx == 2) snprintf(env, sizeof env, "linear %d/%d", chan->linear, chan->linear_reload);
+            else snprintf(env, sizeof env, "%s%s %d/%d", chan->env_constant ? "const" : "decay", chan->env_loop ? " loop" : "",
+                          chan->env_volume, chan->env_counter);
+            if (idx < 2) snprintf(sweep, sizeof sweep, "%s%s period %d shift %d", chan->sweep_enabled ? "on" : "off",
+                                  chan->sweep_negate ? " neg" : "", chan->sweep_period, chan->sweep_shift);
+            else if (idx == 3) snprintf(sweep, sizeof sweep, "%s sequence", chan->noise_mode ? "short" : "long");
+            else snprintf(sweep, sizeof sweep, "-");
+            len = addf(buf, len, sizeof buf, "%-10s %-5s %13s  %-7d %-4d %-4s %-8s %-22s %s\n", names[idx],
+                       chan->enabled ? "on" : "off", freq, chan->period, chan->volume, duty, length, env, sweep);
+        }
+    }
+    len = addf(buf, len, sizeof buf, "%-10s %-5s %10.0f Hz  period %d  level %d  start $%04X (now $%04X)  length %d  left %d  %s%s\n", "DMC",
+               snd.dmc.enabled ? "on" : "off", snd.dmc.rate_hz, snd.dmc.period, snd.dmc.volume, snd.dmc.start_address, snd.dmc.address,
+               snd.dmc.length, snd.dmc.bytes_left, snd.dmc.loop ? "loop " : "", snd.dmc.irq ? "irq" : "");
+    len = addf(buf, len, sizeof buf, "\n$4015 reads $%02X   frame counter %d-step   frame IRQ %s   DMC IRQ %s   APU clock %.0f Hz\n", snd.status,
+               snd.five_step ? 5 : 4, snd.frame_irq ? "set" : "-", snd.dmc_irq ? "set" : "-", snd.cpu_hz);
+    set_view(dbgwin->sound_text, buf);
+}
+
+/* Trace (0: live, the ring as it fills) and History (1: what ran before the
+ * machine stopped, while it is stopped) read the same ring: the newest
+ * HIST_SHOWN entries that pass the filter, oldest first. */
+static void hist_refresh(debugger *dbgwin, int idx, int force)
+{
+    static nesdebug_trace_entry buf[HIST_COPY];
+    static char text[HIST_SHOWN * 260];
+    const int live = idx == 0;
+    const int stopped = nesdebug_is_stopped(dbgwin->dbg) != 0;
+    const int on = live ? nesdebug_trace_enabled(dbgwin->dbg) : nesdebug_history_enabled(dbgwin->dbg);
+    const uint64_t count = live ? nesdebug_trace_total(dbgwin->dbg) : nesdebug_history_count(dbgwin->dbg);
+    uint16_t low = 0, high = 0xFFFF;
+    int filter = NESDEBUG_TRACE_ALL, num, pos, shown = 0, hit[HIST_SHOWN];
+    size_t len = 0;
+    char note[120];
+
+    SendMessageA(dbgwin->h_rec[idx], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    InvalidateRect(dbgwin->h_rec[idx], NULL, FALSE);
+    if (!force && count == dbgwin->h_seen[idx] && (live || stopped)) return;
+    dbgwin->h_seen[idx] = count;
+    if (!live && !stopped) {
+        set_label(dbgwin->h_note[idx], "Stop the machine to read its history.");
+        return;
+    }
+    switch ((int)SendMessageA(dbgwin->h_filter[idx], CB_GETCURSEL, 0, 0)) {
+    case 1: filter = NESDEBUG_TRACE_BRANCHES; break;
+    case 2: {
+        char row[64];
+        GetWindowTextA(dbgwin->h_range[idx], row, sizeof row);
+        if (nessym_parse_range(dbgwin->dbg, row, &low, &high)) filter = NESDEBUG_TRACE_RANGE;
+        break;
+    }
+    default: break;
+    }
+    if (live) {
+        num = nesdebug_trace_read(dbgwin->dbg, buf, HIST_COPY);      /* newest first */
+        for (pos = 0; pos < num && shown < HIST_SHOWN; pos++)
+            if (nesdebug_trace_match(&buf[pos], filter, low, high)) hit[shown++] = pos;
+        text[0] = '\0';
+        if (!on && num == 0) snprintf(text, sizeof text, "The trace is off. Press Record, then let the machine run.");
+        for (pos = shown - 1; pos >= 0 && len + 280 < sizeof text; pos--) {
+            char line[256];
+            nesdebug_trace_format(&buf[hit[pos]], line, (int)sizeof line);
+            len = addf(text, len, sizeof text, "%s\n", line);
+        }
+    } else {
+        num = nesdebug_history_copy(dbgwin->dbg, buf, HIST_COPY);    /* oldest first */
+        for (pos = num - 1; pos >= 0 && shown < HIST_SHOWN; pos--)
+            if (nesdebug_history_match(&buf[pos], filter, low, high)) hit[shown++] = pos;
+        text[0] = '\0';
+        if (!on && num == 0) snprintf(text, sizeof text, "History is off. Press Record, then let the machine run.");
+        for (pos = shown - 1; pos >= 0 && len + 280 < sizeof text; pos--) {
+            char line[256];
+            nesdebug_history_format(&buf[hit[pos]], line, (int)sizeof line);
+            len = addf(text, len, sizeof text, "%s\n", line);
+        }
+    }
+    set_text_at(dbgwin->h_text[idx], text, 1);
+    snprintf(note, sizeof note, "%s%llu instructions recorded, last %d shown", on ? "Recording. " : "",
+             (unsigned long long)count, shown);
+    set_label(dbgwin->h_note[idx], note);
+}
+
+/* The symbols that pass the filter, one a line with its address kept for a
+ * click; rebuilt only when the text would change. */
+static void refresh_symbols(debugger *dbgwin)
+{
+    static int picked[SYM_MAX];
+    static uint16_t fresh[SYM_MAX];
+    char filter[64], count[64];
+    char *text;
+    size_t len = 0, cap = (size_t)SYM_MAX * 96;
+    int num, idx, shown = 0;
+
+    GetWindowTextA(dbgwin->sym_filter, filter, sizeof filter);
+    num = nesdebug_symbols_filter(dbgwin->dbg, filter, picked, SYM_MAX);
+    if (num < 0) num = 0;
     text = malloc(cap);
     if (!text) return;
     text[0] = '\0';
-    d->line_count = n;
-    d->pc_line = pc_line;
-    for (i = 0; i < n; i++) {
-        d->line_addr[i] = lines[i].address;
-        len += (size_t)snprintf(text + len, cap - len, "%c%c %04X  %-9s %-12s %s%s%s\r\n",
-                                lines[i].has_breakpoint ? '*' : ' ', lines[i].is_pc ? '>' : ' ',
-                                lines[i].address, lines[i].bytes, lines[i].label, lines[i].disasm,
-                                lines[i].comment[0] ? "  " : "", lines[i].comment);
-        if (len + 220 >= cap) break;
+    for (idx = 0; idx < num; idx++) {
+        uint16_t addr;
+        char name[80];
+        if (!nesdebug_symbols_get(dbgwin->dbg, picked[idx], &addr, name, (int)sizeof name)) continue;
+        len = addf(text, len, cap, "%04X  %s\n", addr, name);
+        fresh[shown++] = addr;
     }
-    if (n == 0) snprintf(text, cap, "(no disassembly)\r\n");
-    set_text(d->disasm, text);
-    /* The PC line, highlighted by selecting it (EDIT controls have no per-line
-     * colours; the selection shows even without focus thanks to
-     * ES_NOHIDESEL). */
-    if (pc_line >= 0) {
-        int start = (int)SendMessageA(d->disasm, EM_LINEINDEX, (WPARAM)pc_line, 0);
-        int llen = (int)SendMessageA(d->disasm, EM_LINELENGTH, (WPARAM)start, 0);
-        SendMessageA(d->disasm, EM_SETSEL, (WPARAM)start, (LPARAM)(start + llen));
-    } else {
-        SendMessageA(d->disasm, EM_SETSEL, (WPARAM)-1, 0);
+    if (dbgwin->sym_ok && dbgwin->sym_text && strcmp(text, dbgwin->sym_text) == 0) {
+        free(text);
+        return;
     }
-    SendMessageA(d->disasm, EM_LINESCROLL, 0, -DISASM_WINDOW);
-    free(text);
-}
-
-static void refresh_ppu(debugger *d)
-{
-    nesdebug_ppu p;
-    nesdebug_sprite oam[64];
-    static char s[4096];
-    size_t len = 0;
-    int i, view, pal;
-
-    nesdebug_ppu_get(d->dbg, &p);
-    len += (size_t)snprintf(s + len, sizeof s - len,
-        "Frame %u   scanline %d   dot %d\n\n"
-        "PPUCTRL   $2000  %02X   NMI %s, sprites 8x%d, BG $%04X, SPR $%04X, +%d\n"
-        "PPUMASK   $2001  %02X   BG %s%s, SPR %s%s%s\n"
-        "PPUSTATUS $2002  %02X   VBlank %d  Sprite 0 hit %d  Overflow %d\n"
-        "OAMADDR   $2003  %02X\n\n"
-        "v $%04X   t $%04X   fine X %d   write toggle %d\n"
-        "Mirroring: %s\n",
-        p.frame, p.scanline, p.dot,
-        p.ctrl, p.nmi_on_vblank ? "on" : "off", p.sprite_size_16 ? 16 : 8,
-        p.bg_table_1000 ? 0x1000 : 0, p.spr_table_1000 ? 0x1000 : 0, p.increment_32 ? 32 : 1,
-        p.mask, p.show_bg ? "on" : "off", p.show_bg_left ? "" : " (not left 8)",
-        p.show_spr ? "on" : "off", p.show_spr_left ? "" : " (not left 8)", p.grayscale ? ", grayscale" : "",
-        p.status, p.vblank, p.sprite0_hit, p.sprite_overflow,
-        p.oam_addr, p.vram_addr, p.tmp_addr, p.fine_x, p.write_toggle, p.mirroring);
-    set_text_lf(d->ppu_text, s);
-
-    nesdebug_oam_get(d->dbg, oam);
-    len = 0;
-    len += (size_t)snprintf(s + len, sizeof s - len, " #   Y   tile attr  X\n");
-    for (i = 0; i < 64; i++)
-        len += (size_t)snprintf(s + len, sizeof s - len, "%2d  %3d  $%02X  $%02X %3d%s\n", i, oam[i].y,
-                                oam[i].tile, oam[i].attr, oam[i].x, oam[i].y >= 0xEF ? "  (hidden)" : "");
+    /* the row addresses were taken now, with the rows: a row's index means the same thing as long as the list does */
+    free(dbgwin->sym_text);
+    dbgwin->sym_text = text;
+    dbgwin->sym_ok = 1;
+    memcpy(dbgwin->sym_addr, fresh, (size_t)shown * sizeof fresh[0]);
+    dbgwin->sym_lines = shown;
+    snprintf(dbgwin->sym_filter_text, sizeof dbgwin->sym_filter_text, "%s", filter);
+    SendMessageA(dbgwin->sym_list, WM_SETREDRAW, FALSE, 0);
+    SendMessageA(dbgwin->sym_list, LB_RESETCONTENT, 0, 0);
     {
-        int first = (int)SendMessageA(d->oam, EM_GETFIRSTVISIBLELINE, 0, 0);
-        set_text_lf(d->oam, s);
-        SendMessageA(d->oam, EM_LINESCROLL, 0, first);
-    }
-
-    view = (int)SendMessageA(d->ppu_view, CB_GETCURSEL, 0, 0);
-    pal = (int)SendMessageA(d->ppu_palette, CB_GETCURSEL, 0, 0);
-    if (view < 0) view = 0;
-    if (pal < 0) pal = 0;
-    if (!nesdebug_ppu_view(d->dbg, view, pal, d->pic_px, &d->pic_w, &d->pic_h))
-        d->pic_w = d->pic_h = 0;
-    InvalidateRect(d->ppu_pic, NULL, FALSE);
-}
-
-/* The APU view is an ANSI EDIT control: spell the keyboard's UTF-8 legends
- * (the arrows, the yen sign) in ASCII. */
-static void ascii_legends(const char *in, char *out, size_t outsz)
-{
-    static const struct { const char *utf8, *ascii; } map[] = {
-        { "\xe2\x86\x91", "Up" }, { "\xe2\x86\x93", "Down" },
-        { "\xe2\x86\x90", "Left" }, { "\xe2\x86\x92", "Right" }, { "\xc2\xa5", "Yen" },
-    };
-    size_t o = 0;
-    while (*in && o + 1 < outsz) {
-        size_t i, n = 0;
-        const char *rep = NULL;
-        for (i = 0; i < sizeof map / sizeof map[0]; i++) {
-            n = strlen(map[i].utf8);
-            if (strncmp(in, map[i].utf8, n) == 0) { rep = map[i].ascii; break; }
-        }
-        if (rep) {
-            while (*rep && o + 1 < outsz) out[o++] = *rep++;
-            in += n;
-        } else if ((unsigned char)*in < 0x80) {
-            out[o++] = *in++;
-        } else {
-            out[o++] = '?';
-            in++;
-            while (((unsigned char)*in & 0xC0) == 0x80) in++;
+        char *line = text, *eol;
+        while ((eol = strchr(line, '\n')) != NULL) {
+            *eol = '\0';
+            SendMessageA(dbgwin->sym_list, LB_ADDSTRING, 0, (LPARAM)line);
+            *eol = '\n';
+            line = eol + 1;
         }
     }
-    out[o] = '\0';
+    SendMessageA(dbgwin->sym_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(dbgwin->sym_list, NULL, TRUE);
+    snprintf(count, sizeof count, "%d symbol%s%s", shown, shown == 1 ? "" : "s", filter[0] ? " (filtered)" : "");
+    set_label(dbgwin->sym_count, count);
 }
 
-static void refresh_apu(debugger *d)
+/* The packet log is rebuilt only when it changed: a new packet, or a
+ * repeat (which moves the newest serial on). */
+static void refresh_fujinet(debugger *dbgwin, int force)
 {
-    nesdebug_apu a;
-    static const char *const names[8] = { "A", "B", "Select", "Start", "Up", "Down", "Left", "Right" };
-    char s[1600];
-    size_t len = 0;
-    int port, b;
-
-    nesdebug_apu_get(d->dbg, &a);
-    len += (size_t)snprintf(s + len, sizeof s - len,
-        "Pulse 1    %s   period %4d   volume %2d   duty %d\n"
-        "Pulse 2    %s   period %4d   volume %2d   duty %d\n"
-        "Triangle   %s   period %4d\n"
-        "Noise      %s   period %4d   volume %2d\n"
-        "DMC        %s   %d bytes left\n\n"
-        "Frame IRQ %s   DMC IRQ %s\n\n",
-        a.pulse1_enabled ? "on " : "off", a.pulse1_period, a.pulse1_volume, a.pulse1_duty,
-        a.pulse2_enabled ? "on " : "off", a.pulse2_period, a.pulse2_volume, a.pulse2_duty,
-        a.triangle_enabled ? "on " : "off", a.triangle_period,
-        a.noise_enabled ? "on " : "off", a.noise_period, a.noise_volume,
-        a.dmc_enabled ? "on " : "off", a.dmc_bytes_left,
-        a.frame_irq ? "enabled" : "inhibited", a.dmc_irq ? "enabled" : "off");
-    for (port = 0; port < 2; port++) {
-        len += (size_t)snprintf(s + len, sizeof s - len, "Controller %d  $%02X  ", port + 1, a.pad[port]);
-        for (b = 0; b < 8; b++)
-            if (a.pad[port] & (1 << b))
-                len += (size_t)snprintf(s + len, sizeof s - len, " %s", names[b]);
-        len += (size_t)snprintf(s + len, sizeof s - len, "\n");
-    }
-    {
-        static const char *const tape[] = { "idle", "playing", "recording" };
-        const char *kname = nes_keyboard_name(a.keyboard);
-        char held[200];
-        len += (size_t)snprintf(s + len, sizeof s - len, "\nExpansion  %s\n", kname ? kname : "?");
-        if (a.keyboard != NES_KBD_NONE) {
-            ascii_legends(a.keys_held, held, sizeof held);
-            len += (size_t)snprintf(s + len, sizeof s - len, "Keys held  %s\n", held[0] ? held : "(none)");
-        }
-        if (a.keyboard == NES_KBD_FAMILY_BASIC)
-            len += (size_t)snprintf(s + len, sizeof s - len, "Tape       %s\n",
-                                    a.tape >= 0 && a.tape < 3 ? tape[a.tape] : "?");
-    }
-    set_text_lf(d->apu, s);
-}
-
-static void refresh_bps(debugger *d)
-{
-    int i, sel = (int)SendMessageA(d->bp_list, LB_GETCURSEL, 0, 0);
-    d->nbps = nesdebug_breakpoint_list(d->dbg, d->bps, MAX_BPS);
-    SendMessageA(d->bp_list, LB_RESETCONTENT, 0, 0);
-    for (i = 0; i < d->nbps; i++) {
-        const nesdebug_breakpoint *b = &d->bps[i];
-        char line[256], kind[8] = "";
-        if (b->type & NESDEBUG_BP_EXEC) strcat(kind, "x");
-        if (b->type & NESDEBUG_BP_READ) strcat(kind, "r");
-        if (b->type & NESDEBUG_BP_WRITE) strcat(kind, "w");
-        if (b->start == b->end)
-            snprintf(line, sizeof line, "%c %3d  %-3s  $%04X        %s%s", b->enabled ? '+' : '-',
-                     b->id, kind, b->start, b->condition[0] ? "if " : "", b->condition);
-        else
-            snprintf(line, sizeof line, "%c %3d  %-3s  $%04X-$%04X  %s%s", b->enabled ? '+' : '-',
-                     b->id, kind, b->start, b->end, b->condition[0] ? "if " : "", b->condition);
-        SendMessageA(d->bp_list, LB_ADDSTRING, 0, (LPARAM)line);
-    }
-    if (d->nbps == 0) SendMessageA(d->bp_list, LB_ADDSTRING, 0, (LPARAM)"(no breakpoints -- click a disassembly line, or add one below)");
-    if (sel >= 0 && sel < d->nbps) SendMessageA(d->bp_list, LB_SETCURSEL, (WPARAM)sel, 0);
-}
-
-static void refresh_cart(debugger *d)
-{
-    nesdebug_cart c;
-    char info[256];
-    static char s[2048];
-    nesdebug_cart_get(d->dbg, &c);
-    nesdebug_cart_info(d->dbg, info, sizeof info);
-    if (!c.present) { set_text_lf(d->cart, "No FujiNet cartridge is running."); return; }
-    snprintf(s, sizeof s,
-        "%s\n\n"
-        "Link            %s%s%s\n"
-        "Mailbox         %s\n"
-        "SRAM            %s%s\n"
-        "Image           %s, mapper %d %s\n"
-        "PRG slots       $8000:%02X  $A000:%02X  $C000:%02X  $E000:%02X\n"
-        "CHR slots       %03X %03X %03X %03X  %03X %03X %03X %03X\n"
-        "Mirroring       %s\n"
-        "WRAM            %s%s     CHR %s\n"
-        "IRQ             %s  line %d  latch %d  counter %d\n\n"
-        "ACKSEQ $%02X   status $%02X   last error %u\n"
-        "Boot state $%02X  %u%%  error %u\n"
-        "RMW dummies dropped %u   worker queue %u\n%s%s",
-        info,
-        c.link_up ? "up" : "down", c.busy ? " (transaction in flight)" : "",
-        (!c.link_up && c.link_error[0]) ? "" : "",
-        c.mailbox_live ? "live" : "closed (the running image does not claim it)",
-        c.sram_enabled ? "enabled" : "off (power-on vectors)", c.loading ? "  -- loading" : "",
-        c.booted_image ? "game" : "CONFIG", c.mapper, c.mapper_name,
-        c.prg_slot[0], c.prg_slot[1], c.prg_slot[2], c.prg_slot[3],
-        c.chr_slot[0], c.chr_slot[1], c.chr_slot[2], c.chr_slot[3],
-        c.chr_slot[4], c.chr_slot[5], c.chr_slot[6], c.chr_slot[7],
-        c.mirroring, c.wram_enabled ? "on" : "off", c.wram_protected ? " (protected)" : "",
-        c.chr_writable ? "RAM" : "ROM",
-        c.irq_enabled ? "enabled" : "off", c.irq_line, c.irq_latch, c.irq_counter,
-        c.ackseq, c.status, c.last_error, c.boot_state, c.boot_pct, c.boot_err,
-        c.diag_rmw, c.queue_depth,
-        c.link_error[0] ? "\nLink: " : "", c.link_error);
-    set_text_lf(d->cart, s);
-}
-
-/* The note and the link's state always; the log only when it changed. */
-static void refresh_fujinet(debugger *d, int force)
-{
-    static nesdebug_fuji_packet p[TRACE_MAX];
-    static char t[TRACE_MAX * 320 + 128];
+    static nesdebug_fuji_packet ptr[TRACE_MAX];
+    static char buf[TRACE_MAX * 320 + 128];   /* an entry is at most ~300 */
     static char state[2048];
+    char note[200];
     size_t len = 0;
-    int n = nesdebug_fujinet_trace(d->dbg, p, TRACE_MAX), i, follow;
+    int num = nesdebug_fujinet_trace(dbgwin->dbg, ptr, TRACE_MAX), idx, follow;
 
-    if (!nessession_is_running(d->session))
-        set_label(d->fuji_note, "The NES is off.");
-    else if (nessession_fujinet_external(d->session)) {
-        char note[160];
-        snprintf(note, sizeof note, "External FujiNet at %s; the cartridge is %s.",
-                 nessession_boip_endpoint(d->session),
-                 nessession_cart_link_up(d->session) == 1 ? "connected" : "not connected");
-        set_label(d->fuji_note, note);
-    } else if (!nessession_fujinet_running(d->session))
-        set_label(d->fuji_note, "FujiNet is off (Machine > Settings > Enable FujiNet).");
+    if (!nessession_is_running(dbgwin->session))
+        snprintf(note, sizeof note, "The NES is off.");
+    else if (nessession_fujinet_external(dbgwin->session))
+        snprintf(note, sizeof note, "External FujiNet at %s; the cartridge is %s.", nessession_boip_endpoint(dbgwin->session),
+                 nessession_cart_link_up(dbgwin->session) == 1 ? "connected" : "not connected");
+    else if (!nessession_fujinet_running(dbgwin->session))
+        snprintf(note, sizeof note, "FujiNet is off (Machine > Settings > Enable FujiNet).");
     else
-        set_label(d->fuji_note, nessession_cart_link_up(d->session) == 1
-                                    ? "FujiNet is on; the cartridge is connected."
-                                    : "FujiNet is on; the cartridge is not connected.");
+        snprintf(note, sizeof note, nessession_cart_link_up(dbgwin->session) == 1 ? "FujiNet is on; the cartridge is connected."
+                                                                                   : "FujiNet is on; the cartridge is not connected.");
+    set_label(dbgwin->fuji_note, note);
     state[0] = '\0';
-    nesdebug_fujinet_state(d->dbg, state, sizeof state);
-    set_text_at(d->fuji_state, state, 0);
-    if (n < 0) n = 0;
+    nesdebug_fujinet_state(dbgwin->dbg, state, (int)sizeof state);
+    set_text_at(dbgwin->fuji_state, state, 0);
+    if (num < 0) num = 0;
 
-    if (!force && n == d->fuji_count && (n == 0 || p[n - 1].serial == d->fuji_last)) return;
-    follow = force || d->fuji_count < 0 || edit_at_end(d, d->fuji_text);
-    d->fuji_count = n;
-    d->fuji_last = n > 0 ? p[n - 1].serial : 0;
-    t[0] = '\0';
-    for (i = 0; i < n; i++) {
+    if (!force && num == dbgwin->fuji_count && (num == 0 || ptr[num - 1].serial == dbgwin->fuji_last)) return;
+    follow = force || dbgwin->fuji_count < 0 || edit_at_end(dbgwin, dbgwin->fuji_text);
+    dbgwin->fuji_count = num;
+    dbgwin->fuji_last = num > 0 ? ptr[num - 1].serial : 0;
+    buf[0] = '\0';
+    for (idx = 0; idx < num; idx++) {
         int k;
-        len = addf(t, len, sizeof t, "%s%s\n     ", i ? "\n" : "", p[i].text);
-        for (k = 0; k < p[i].nbytes && k < (int)sizeof p[i].data; k++)
-            len = addf(t, len, sizeof t, "%02X ", p[i].data[k]);
-        if (p[i].nbytes > (int)sizeof p[i].data) len = addf(t, len, sizeof t, "\xe2\x80\xa6");
+        len = addf(buf, len, sizeof buf, "%s%s", idx ? "\n" : "", ptr[idx].text);
+        if (ptr[idx].repeat > 1) len = addf(buf, len, sizeof buf, " \xc3\x97%u", (unsigned)ptr[idx].repeat);
+        len = addf(buf, len, sizeof buf, "\n     ");
+        for (k = 0; k < ptr[idx].nbytes && k < (int)sizeof ptr[idx].data; k++)
+            len = addf(buf, len, sizeof buf, "%02X ", ptr[idx].data[k]);
+        if (ptr[idx].nbytes > (int)sizeof ptr[idx].data) len = addf(buf, len, sizeof buf, "\xe2\x80\xa6");
     }
-    if (n == 0) len = addf(t, len, sizeof t, "(no FujiBus packets since the trace was cleared)");
-    set_text_at(d->fuji_text, t, follow);
+    if (num == 0) len = addf(buf, len, sizeof buf, "(no FujiBus packets since the trace was cleared)");
+    set_text_at(dbgwin->fuji_text, buf, follow);
 }
 
-static void refresh_all(debugger *d)
+
+/* One tab brought up to date (force: the live ones too, the Video tab redrawn). */
+static void refresh_page(debugger *dbgwin, int page, int force)
 {
-    refresh_status(d);
-    refresh_cpu(d);
-    refresh_ram(d);
-    refresh_disasm(d);
-    refresh_ppu(d);
-    refresh_apu(d);
-    refresh_bps(d);
-    refresh_cart(d);
-    refresh_fujinet(d, 0);
+    switch (page) {
+    case TAB_MEMORY: refresh_mem(dbgwin); break;
+    case TAB_DISASM: refresh_disasm(dbgwin); break;
+    case TAB_BREAKS: refresh_bps(dbgwin); refresh_bp_stop(dbgwin); break;
+    case TAB_WATCHES: refresh_watches(dbgwin); break;
+    case TAB_CART: cart_fetch(dbgwin); refresh_cart(dbgwin); refresh_io(dbgwin); break;
+    case TAB_TRACE: hist_refresh(dbgwin, 0, force); break;
+    case TAB_HISTORY: hist_refresh(dbgwin, 1, force); break;
+    case TAB_VIDEO: if (dbgwin->video) dbg_video_refresh(dbgwin->video, force); break;
+    case TAB_SOUND: refresh_sound(dbgwin); break;
+    case TAB_SYMBOLS: refresh_symbols(dbgwin); break;
+    case TAB_FUJINET: refresh_fujinet(dbgwin, 0); break;
+    default: break;
+    }
+}
+
+/* The tabs on screen: the one the tab control shows, and any in a window of its own. */
+static void refresh_shown(debugger *dbgwin, int force)
+{
+    int ptr;
+    for (ptr = 0; ptr < TAB_COUNT; ptr++)
+        if (page_visible(dbgwin, ptr)) refresh_page(dbgwin, ptr, force);
+}
+
+/* At a new stop the console says why, as the other frontends' do. */
+static void console_stop(debugger *dbgwin, const nesdebug_snapshot *snap)
+{
+    char line[220];
+    if (!snap->paused || snap->serial == dbgwin->con_serial) return;
+    dbgwin->con_serial = snap->serial;
+    snprintf(line, sizeof line, "\xe2\x80\x94 %s", snap->text);
+    console_output(dbgwin, line);
+}
+
+/* After anything that may have moved the engine: the status, the register
+ * strip and the tabs showing follow it. */
+static void resync(debugger *dbgwin)
+{
+    nesdebug_snapshot snap;
+    const int stopped = nesdebug_stop_snapshot(dbgwin->dbg, &snap) != 0;
+    console_stop(dbgwin, &snap);
+    dbgwin->was_stopped = stopped;
+    dbgwin->seen_serial = snap.serial;
+    dbgwin->seen_gen = nesdebug_generation(dbgwin->dbg);
+    dbgwin->running_ticks = 0;
+    refresh_status(dbgwin);
+    refresh_cpu(dbgwin);
+    refresh_shown(dbgwin, 1);
+}
+
+/* A step takes microseconds: a moment's wait for the stop keeps the window
+ * from flashing "Running" in between. */
+static void settle_and_sync(debugger *dbgwin, int expect_stop)
+{
+    int idx;
+    dbgwin->notice[0] = '\0';        /* the machine moved: its new state replaces a notice */
+    for (idx = 0; expect_stop && idx < 40 && !nesdebug_is_stopped(dbgwin->dbg); idx++)
+        Sleep(1);
+    resync(dbgwin);
+}
+
+static void tick(debugger *dbgwin)
+{
+    nesdebug_snapshot snap;
+    unsigned gen;
+    int stopped;
+    if (!IsWindowVisible(dbgwin->hwnd)) return;
+    if (dbgwin->notice[0] && !notice_showing(dbgwin)) {
+        dbgwin->notice[0] = '\0';
+        refresh_status(dbgwin);
+    }
+    gen = nesdebug_generation(dbgwin->dbg);
+    stopped = nesdebug_stop_snapshot(dbgwin->dbg, &snap) != 0;
+    if (gen != dbgwin->seen_gen || stopped != dbgwin->was_stopped || snap.serial != dbgwin->seen_serial) {
+        if (stopped != dbgwin->was_stopped) dbgwin->notice[0] = '\0';   /* a stop (or a go) says so at once */
+        resync(dbgwin);
+        return;
+    }
+    /* the picture moves while the machine runs */
+    if (page_visible(dbgwin, TAB_VIDEO) && dbgwin->video) dbg_video_refresh(dbgwin->video, 0);
+    /* the cartridge's link runs on its own thread, stopped CPU or not */
+    if (page_visible(dbgwin, TAB_FUJINET) && ++dbgwin->fuji_ticks >= 5) {
+        dbgwin->fuji_ticks = 0;
+        refresh_fujinet(dbgwin, 0);
+    }
+    if (!stopped) {
+        /* running: the status line twice a second, and a recording Trace (each read pauses the machine for a moment) */
+        if (++dbgwin->running_ticks >= 5) {
+            dbgwin->running_ticks = 0;
+            refresh_status(dbgwin);
+        }
+        if (page_visible(dbgwin, TAB_TRACE) && nesdebug_trace_enabled(dbgwin->dbg) && ++dbgwin->h_ticks >= LIVE_TRACE_TICKS) {
+            dbgwin->h_ticks = 0;
+            hist_refresh(dbgwin, 0, 0);
+        }
+    } else {
+        /* a stop that came inside the debounce gap of the slow reads: catch up */
+        if (page_visible(dbgwin, TAB_CART) && dbgwin->cart_dirty) refresh_page(dbgwin, TAB_CART, 0);
+        if (page_visible(dbgwin, TAB_MEMORY) && dbgwin->mem_map_dirty) refresh_page(dbgwin, TAB_MEMORY, 0);
+    }
 }
 
 /* ---- actions ------------------------------------------------------------------ */
 
-static void toggle_run(debugger *d)
+static void on_run(debugger *dbgwin)
 {
-    if (nesdebug_is_stopped(d->dbg)) nesdebug_resume(d->dbg);
-    else nesdebug_stop(d->dbg);
-    refresh_all(d);
+    const int stopped = nesdebug_is_stopped(dbgwin->dbg);
+    if (stopped) nesdebug_resume(dbgwin->dbg);
+    else nesdebug_stop(dbgwin->dbg);
+    settle_and_sync(dbgwin, !stopped);
 }
 
-static void run_prompt(debugger *d)
+static void on_run_to(debugger *dbgwin)
 {
-    static char out[65536];
-    char cmd[512], echo[540];
-    edit_text(d->prompt_in, cmd, sizeof cmd);
-    if (!cmd[0]) return;
-    snprintf(echo, sizeof echo, "> %s\n", cmd);
-    append_text_lf(d->prompt_out, echo);
-    nesdebug_command(d->dbg, cmd, out, sizeof out);
-    append_text_lf(d->prompt_out, out);
-    append_text_lf(d->prompt_out, "\n");
-    set_text(d->prompt_in, "");
-    refresh_all(d);
-}
-
-static void complete_prompt(debugger *d)
-{
-    char text[512], comps[4096];
-    const char *word;
-    char *sp;
-    int n;
-    edit_text(d->prompt_in, text, sizeof text);
-    sp = strrchr(text, ' ');
-    word = sp ? sp + 1 : text;
-    n = nesdebug_completions(d->dbg, word, comps, sizeof comps);
-    if (n == 1) {
-        char line[256], joined[800];
-        char *nl;
-        snprintf(line, sizeof line, "%.255s", comps);
-        nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        if (sp) sp[1] = '\0'; else text[0] = '\0';
-        snprintf(joined, sizeof joined, "%s%s ", text, line);
-        set_text(d->prompt_in, joined);
-        SendMessageA(d->prompt_in, EM_SETSEL, (WPARAM)strlen(joined), (LPARAM)strlen(joined));
-    } else if (n > 1) {
-        append_text_lf(d->prompt_out, comps);
-    }
-}
-
-static void jump_to(debugger *d, const char *text)
-{
-    const int addr = resolve_addr(d, text);
-    if (addr < 0) {
-        append_text_lf(d->prompt_out, "No such label or address.\n");
+    if (dbgwin->selected < 0) {
+        toast(dbgwin, "Select a line in the Disassembly to run to");
         return;
     }
-    SendMessageA(d->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
-    d->disasm_top = addr;
-    refresh_disasm(d);
+    nesdebug_run_to(dbgwin->dbg, (uint16_t)dbgwin->selected);
+    settle_and_sync(dbgwin, 1);
 }
 
-static int pick_file(debugger *d, int save, const char *title, const char *filter, char *path, DWORD pathsz)
+static void toggle_breakpoint(debugger *dbgwin, int addr)
+{
+    nesdebug_breakpoint_toggle(dbgwin->dbg, (uint16_t)addr);
+    resync(dbgwin);
+}
+
+/* F9: the breakpoint on the selected disassembly line. */
+static void on_toggle_bp(debugger *dbgwin)
+{
+    if (dbgwin->selected < 0) {
+        toast(dbgwin, "Select a line in the Disassembly first");
+        return;
+    }
+    toggle_breakpoint(dbgwin, dbgwin->selected);
+}
+
+static void on_console(debugger *dbgwin)
+{
+    static char out[65536];
+    char buf[256], line[300], *cmd;
+    const int was = nesdebug_is_stopped(dbgwin->dbg);
+
+    edit_text(dbgwin->con_in, buf, sizeof buf);
+    cmd = strip(buf);
+    if (!*cmd) return;
+    /* history: the newest last, no repeats of the one before */
+    if (dbgwin->nhistory == 0 || strcmp(dbgwin->history[dbgwin->nhistory - 1], cmd) != 0) {
+        if (dbgwin->nhistory == HISTORY_MAX) {
+            memmove(dbgwin->history[0], dbgwin->history[1], sizeof dbgwin->history[0] * (HISTORY_MAX - 1));
+            dbgwin->nhistory--;
+        }
+        snprintf(dbgwin->history[dbgwin->nhistory++], sizeof dbgwin->history[0], "%s", cmd);
+    }
+    dbgwin->history_pos = dbgwin->nhistory;
+    snprintf(line, sizeof line, "> %s\n", cmd);
+    edit_to_end(dbgwin->con_out);     /* a command brings the reader back down */
+    console_append(dbgwin, line);
+
+    out[0] = '\0';
+    nesdebug_command(dbgwin->dbg, cmd, out, sizeof out);
+    SetWindowTextA(dbgwin->con_in, "");
+    console_output(dbgwin, out);
+    settle_and_sync(dbgwin, was);
+}
+
+/* Up and Down walk the commands already run; past the newest is an empty
+ * line again. */
+static void history_step(debugger *dbgwin, int newer)
+{
+    int len;
+    if (dbgwin->nhistory == 0) return;
+    dbgwin->history_pos += newer ? 1 : -1;
+    if (dbgwin->history_pos < 0) dbgwin->history_pos = 0;
+    if (dbgwin->history_pos >= dbgwin->nhistory) {
+        dbgwin->history_pos = dbgwin->nhistory;
+        SetWindowTextA(dbgwin->con_in, "");
+        return;
+    }
+    SetWindowTextA(dbgwin->con_in, dbgwin->history[dbgwin->history_pos]);
+    len = GetWindowTextLengthA(dbgwin->con_in);
+    SendMessageA(dbgwin->con_in, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+}
+
+/* Tab: the engine completes the end of the line; one answer takes its
+ * place, several are listed (and the part they share is typed). */
+static void complete_console(debugger *dbgwin)
+{
+    char text[256], comps[4096], common[256] = "", line[256];
+    char *sp, *cur, *nl;
+    int num, first = 1;
+    edit_text(dbgwin->con_in, text, sizeof text);
+    num = nesdebug_completions(dbgwin->dbg, text, comps, sizeof comps);
+    if (num <= 0) return;
+    for (cur = comps; *cur; cur = nl ? nl + 1 : cur + strlen(cur)) {
+        int k = 0;
+        nl = strchr(cur, '\n');
+        snprintf(line, sizeof line, "%.*s", nl ? (int)(nl - cur) : (int)strlen(cur), cur);
+        if (!line[0]) continue;
+        if (first) {
+            snprintf(common, sizeof common, "%s", line);
+            first = 0;
+        } else {
+            while (common[k] && line[k] && common[k] == line[k]) k++;
+            common[k] = '\0';
+        }
+    }
+    if (num > 1) console_append(dbgwin, comps);
+    sp = strrchr(text, ' ');
+    if ((int)strlen(common) < (int)strlen(sp ? sp + 1 : text))
+        snprintf(common, sizeof common, "%s", sp ? sp + 1 : text);   /* never shorter than typed */
+    if (sp) sp[1] = '\0'; else text[0] = '\0';
+    {
+        char joined[600];
+        snprintf(joined, sizeof joined, "%s%s%s", text, common, num == 1 ? " " : "");
+        SetWindowTextA(dbgwin->con_in, joined);
+        SendMessageA(dbgwin->con_in, EM_SETSEL, (WPARAM)strlen(joined), (LPARAM)strlen(joined));
+    }
+}
+
+
+/* A value typed into a register box: hex ("1F", "$1F", "0x1F"), "#31" decimal,
+ * or anything the engine's expressions take (a label, "hl + 2", "[$C000]"). */
+static int parse_value(debugger *dbgwin, const char *text, long *out, char *err, int errsz)
+{
+    char buf[128], *ptr;
+    snprintf(buf, sizeof buf, "%s", text);
+    ptr = strip(buf);
+    if (!*ptr) {
+        snprintf(err, (size_t)errsz, "Type a value");
+        return 0;
+    }
+    if (parse_num(ptr, out)) return 1;
+    return nesdebug_eval(dbgwin->dbg, ptr, out, err, errsz) == 0;
+}
+
+/* A register box (Enter). Refused, with a notice, unless stopped. */
+static void on_reg(debugger *dbgwin, int idx)
+{
+    char buf[64], err[160];
+    long val;
+    edit_text(dbgwin->reg[idx], buf, sizeof buf);
+    err[0] = '\0';
+    if (!nesdebug_is_stopped(dbgwin->dbg)) {
+        toast(dbgwin, "Stop the machine first to change a register");
+    } else if (!parse_value(dbgwin, buf, &val, err, sizeof err)) {
+        toast(dbgwin, err[0] ? err : "Not a number (hex, # decimal, or an expression)");
+    } else if (!nesdebug_register_set(dbgwin->dbg, k_reg_ids[idx], val, err, sizeof err)) {
+        toast(dbgwin, err[0] ? err : "That register could not be set");
+    }
+    SetFocus(dbgwin->hwnd);
+    resync(dbgwin);
+}
+
+static void on_check(debugger *dbgwin, int idx)
+{
+    char err[160];
+    const int on = SendMessageA(dbgwin->chk[idx], BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (dbgwin->updating) return;
+    if (!nesdebug_is_stopped(dbgwin->dbg)) {
+        toast(dbgwin, "Stop the machine first to change a flag");
+        refresh_cpu(dbgwin);     /* the box goes back to the CPU's */
+        return;
+    }
+    err[0] = '\0';
+    if (!nesdebug_register_set(dbgwin->dbg, k_chk_ids[idx], on, err, sizeof err)) toast(dbgwin, err[0] ? err : "That flag could not be set");
+    resync(dbgwin);
+}
+
+/* A number or an expression of the engine's, for an address in any space but the CPU's. */
+static int mem_value(debugger *dbgwin, const char *text, uint32_t *out)
+{
+    char buf[128], err[96], *ptr;
+    long val;
+    snprintf(buf, sizeof buf, "%s", text);
+    ptr = strip(buf);
+    if (!*ptr) return 0;
+    if (!parse_num(ptr, &val) && nesdebug_eval(dbgwin->dbg, ptr, &val, err, (int)sizeof err) != 0) return 0;
+    if (val < 0) return 0;
+    *out = (uint32_t)val;
+    return 1;
+}
+
+/* "low-high", "low..high" or one address, in the Memory tab's space: the CPU's
+ * takes labels and expressions through the engine's range parser. */
+static int mem_range(debugger *dbgwin, const char *text, uint32_t *low, uint32_t *high)
+{
+    char buf[128], *sep, *rest;
+    if (dbgwin->mem_space_id == NESDEBUG_SPACE_CPU) {
+        uint16_t lo16, hi16;
+        if (!nessym_parse_range(dbgwin->dbg, text, &lo16, &hi16)) return 0;
+        *low = lo16;
+        *high = hi16;
+        return 1;
+    }
+    snprintf(buf, sizeof buf, "%s", text);
+    sep = strstr(buf, "..");
+    if (sep) {
+        *sep = '\0';
+        rest = sep + 2;
+    } else if ((sep = strchr(buf + 1, '-')) != NULL) {
+        *sep = '\0';
+        rest = sep + 1;
+    } else {
+        rest = NULL;
+    }
+    if (!mem_value(dbgwin, buf, low)) return 0;
+    if (rest) {
+        if (!mem_value(dbgwin, rest, high)) return 0;
+    } else {
+        *high = *low;
+    }
+    if (*high < *low) {
+        const uint32_t swap = *low;
+        *low = *high;
+        *high = swap;
+    }
+    return 1;
+}
+
+/* Go to: the dump from just above an address, label, expression or range, its
+ * bytes selected and scrolled to. */
+static void on_mem_goto(debugger *dbgwin)
+{
+    char buf[64];
+    uint32_t low, high;
+    edit_text(dbgwin->mem_goto, buf, sizeof buf);
+    if (!mem_range(dbgwin, buf, &low, &high)) {
+        dbgwin->mem_hl = 0;
+        refresh_mem(dbgwin);
+        toast(dbgwin, dbgwin->mem_space_id == NESDEBUG_SPACE_CPU ? "Not an address, label, expression or range" : "Not an address or range");
+        return;
+    }
+    show_in_memory(dbgwin, (int)low, (int)high);
+}
+
+/* The dump a page of MEM_BYTES on or back. */
+static void on_mem_page(debugger *dbgwin, int dir)
+{
+    const int size = mem_space_size(dbgwin);
+    dbgwin->mem_top += dir * MEM_BYTES;
+    if (dbgwin->mem_top > size - 1) dbgwin->mem_top = size - 1;
+    if (dbgwin->mem_top < 0) dbgwin->mem_top = 0;
+    dbgwin->mem_top &= ~0xF;
+    refresh_mem(dbgwin);
+}
+
+/* "address value [value...]": bytes into memory from the address on. */
+static void on_mem_write(debugger *dbgwin)
+{
+    char buf[256], *tok, *save = NULL, msg[96];
+    uint32_t addr;
+    int num = 0;
+    edit_text(dbgwin->mem_write, buf, sizeof buf);
+    tok = strtok_s(buf, " \t,", &save);
+    if (!tok) return;
+    if (dbgwin->mem_space_id == NESDEBUG_SPACE_CPU) {
+        const int cpu_addr = resolve_addr(dbgwin, tok);
+        if (cpu_addr < 0) {
+            toast(dbgwin, "Not an address or label");
+            return;
+        }
+        addr = (uint32_t)cpu_addr;
+    } else if (!mem_value(dbgwin, tok, &addr)) {
+        toast(dbgwin, "Not an address");
+        return;
+    }
+    while ((tok = strtok_s(NULL, " \t,", &save)) != NULL) {
+        long val;
+        uint8_t byte;
+        if (!parse_num(tok, &val) || val < 0 || val > 0xFF) {
+            toast(dbgwin, "A value is a byte (00-FF)");
+            return;
+        }
+        byte = (uint8_t)val;
+        nesdebug_write_space(dbgwin->dbg, dbgwin->mem_space_id, addr + (uint32_t)num, &byte, 1);
+        num++;
+    }
+    if (!num) {
+        toast(dbgwin, "Type: address value [value...]");
+        return;
+    }
+    snprintf(msg, sizeof msg, "Wrote %d byte%s at $%04X (%s)", num, num == 1 ? "" : "s", (unsigned)addr,
+             nesdebug_space_name(dbgwin->mem_space_id));
+    toast(dbgwin, msg);
+    resync(dbgwin);
+}
+
+static void on_jump(debugger *dbgwin)
+{
+    char buf[64];
+    int addr;
+    edit_text(dbgwin->jump, buf, sizeof buf);
+    addr = resolve_addr(dbgwin, buf);
+    if (addr < 0) {
+        toast(dbgwin, "Not an address or label");
+        return;
+    }
+    SendMessageA(dbgwin->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
+    dbgwin->disasm_top = addr;
+    dbgwin->selected = addr;
+    refresh_disasm(dbgwin);
+}
+
+
+/* Break at: an execute breakpoint at an address, label or expression. */
+static void on_break_at(debugger *dbgwin)
+{
+    char buf[64], msg[64];
+    int addr;
+    edit_text(dbgwin->break_at, buf, sizeof buf);
+    addr = resolve_addr(dbgwin, buf);
+    if (addr < 0) {
+        toast(dbgwin, "Not an address or label");
+        return;
+    }
+    if (!nesdebug_breakpoint_check(dbgwin->dbg, (uint16_t)addr)) nesdebug_breakpoint_toggle(dbgwin->dbg, (uint16_t)addr);
+    SetWindowTextA(dbgwin->break_at, "");
+    snprintf(msg, sizeof msg, "Breakpoint at $%04X", addr);
+    toast(dbgwin, msg);
+    resync(dbgwin);
+}
+
+/* The selected breakpoint row's index, or -1. */
+static int bp_selected(debugger *dbgwin)
+{
+    const int idx = (int)SendMessageA(dbgwin->bp_list, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+    return idx >= 0 && idx < dbgwin->nbps ? idx : -1;
+}
+
+static void on_bp_remove(debugger *dbgwin)
+{
+    const int idx = bp_selected(dbgwin);
+    if (idx < 0) {
+        set_label(dbgwin->bp_msg, "Select a breakpoint to remove");
+        return;
+    }
+    set_label(dbgwin->bp_msg, "");
+    nesdebug_breakpoint_remove(dbgwin->dbg, dbgwin->bps[idx].id);
+    resync(dbgwin);
+}
+
+static void on_bp_add(debugger *dbgwin)
+{
+    char start_text[64], end_text[64], cond[256], err[160];
+    uint32_t start, end;
+    int sel, space_sel, ctl_id, space, type;
+    edit_text(dbgwin->bp_start, start_text, sizeof start_text);
+    edit_text(dbgwin->bp_end, end_text, sizeof end_text);
+    edit_text(dbgwin->bp_cond, cond, sizeof cond);
+    sel = (int)SendMessageA(dbgwin->bp_type, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= NBPTYPES) sel = 0;
+    space_sel = (int)SendMessageA(dbgwin->bp_space, CB_GETCURSEL, 0, 0);
+    if (space_sel < 0 || space_sel >= NBPSPACES) space_sel = 0;
+    type = k_bp_type_ids[sel];
+    space = k_bp_space_ids[space_sel];
+    if (type == NESDEBUG_BP_EXEC && space != NESDEBUG_SPACE_CPU) {
+        set_label(dbgwin->bp_msg, "Execute breakpoints are on the CPU bus");
+        return;
+    }
+    if (space == NESDEBUG_SPACE_CPU) {
+        const int cpu_addr = resolve_addr(dbgwin, strip(start_text));
+        if (cpu_addr < 0) {
+            set_label(dbgwin->bp_msg, "The start is not an address, label or expression");
+            return;
+        }
+        start = (uint32_t)cpu_addr;
+    } else if (!mem_value(dbgwin, start_text, &start)) {
+        set_label(dbgwin->bp_msg, "The start is not an address or expression");
+        return;
+    }
+    if (strip(end_text)[0]) {
+        if (space == NESDEBUG_SPACE_CPU) {
+            const int cpu_end = resolve_addr(dbgwin, strip(end_text));
+            if (cpu_end < 0) {
+                set_label(dbgwin->bp_msg, "The end is not an address, label or expression");
+                return;
+            }
+            end = (uint32_t)cpu_end;
+        } else if (!mem_value(dbgwin, end_text, &end)) {
+            set_label(dbgwin->bp_msg, "The end is not an address or expression");
+            return;
+        }
+    } else {
+        end = start;
+    }
+    if (end < start) end = start;
+    err[0] = '\0';
+    ctl_id = nesdebug_breakpoint_add_in(dbgwin->dbg, space, type, start, end, strip(cond), err, sizeof err);
+    if (ctl_id < 0) {
+        set_label(dbgwin->bp_msg, err[0] ? err : "That breakpoint could not be set");
+        return;
+    }
+    set_label(dbgwin->bp_msg, "");
+    SetWindowTextA(dbgwin->bp_start, "");
+    SetWindowTextA(dbgwin->bp_end, "");
+    SetWindowTextA(dbgwin->bp_cond, "");
+    resync(dbgwin);
+}
+
+/* Replaces the selected breakpoint's condition with the edit box's text. */
+static void on_bp_set(debugger *dbgwin)
+{
+    char cond[256], err[160];
+    const int idx = bp_selected(dbgwin);
+    if (idx < 0) {
+        set_label(dbgwin->bp_msg, "Select a breakpoint to change its condition");
+        return;
+    }
+    edit_text(dbgwin->bp_edit, cond, sizeof cond);
+    err[0] = '\0';
+    if (!nesdebug_breakpoint_set_condition(dbgwin->dbg, dbgwin->bps[idx].id, strip(cond), err, sizeof err)) {
+        set_label(dbgwin->bp_msg, err[0] ? err : "That condition could not be set");
+        return;
+    }
+    set_label(dbgwin->bp_msg, "");
+    resync(dbgwin);
+}
+
+/* The type and the space decide what the boxes take: Execute lives on the CPU
+ * bus only, so choosing one moves the other. */
+static void on_bp_choice(debugger *dbgwin, int space_changed)
+{
+    const int type = (int)SendMessageA(dbgwin->bp_type, CB_GETCURSEL, 0, 0);
+    const int space = (int)SendMessageA(dbgwin->bp_space, CB_GETCURSEL, 0, 0);
+    const int cpu = space <= 0;
+    if (type == 0 && !cpu) {
+        if (space_changed) SendMessageA(dbgwin->bp_type, CB_SETCURSEL, 2, 0);          /* Write */
+        else SendMessageA(dbgwin->bp_space, CB_SETCURSEL, 0, 0);                        /* the CPU bus */
+    }
+    {
+        const int now_cpu = (int)SendMessageA(dbgwin->bp_space, CB_GETCURSEL, 0, 0) <= 0;
+        SendMessageW(dbgwin->bp_start, EM_SETCUEBANNER, TRUE, (LPARAM)(now_cpu ? L"C000 or a label" : L"address in that space"));
+        SendMessageW(dbgwin->bp_end, EM_SETCUEBANNER, TRUE, (LPARAM)L"(end)");
+        SendMessageW(dbgwin->bp_cond, EM_SETCUEBANNER, TRUE,
+                     (LPARAM)(now_cpu ? L"condition, e.g. value != old   (value, address, old, a, x, y, [addr])"
+                                      : L"condition, e.g. value == $0F   (value, address; old is CPU only)"));
+    }
+}
+
+/* ---- watches and the memory search ------------------------------------------- */
+
+static void add_watch(debugger *dbgwin)
+{
+    char text[128];
+    edit_text(dbgwin->wt_entry, text, sizeof text);
+    if (neswatch_add(strip(text)) < 0) {
+        toast(dbgwin, "Type an address, label, expression or a range (7000-70ff)");
+        return;
+    }
+    SetWindowTextA(dbgwin->wt_entry, "");
+    refresh_watches(dbgwin);
+}
+
+static int watch_range(debugger *dbgwin, uint16_t *low, uint16_t *high)
+{
+    const int sel = (int)SendMessageA(dbgwin->wt_list, LB_GETCURSEL, 0, 0);
+    return sel >= 0 && neswatch_range(dbgwin->dbg, sel, low, high);
+}
+
+/* Break on a write that changes the watched bytes. */
+static void watch_break(debugger *dbgwin, uint16_t low, uint16_t high)
+{
+    char err[160];
+    err[0] = '\0';
+    if (nesdebug_breakpoint_add_in(dbgwin->dbg, NESDEBUG_SPACE_CPU, NESDEBUG_BP_WRITE, low, high, "value != old", err, sizeof err) >= 0)
+        toast(dbgwin, "Breaking when it changes");
+    else
+        toast(dbgwin, err[0] ? err : "That breakpoint could not be set");
+    resync(dbgwin);
+}
+
+static void do_search(debugger *dbgwin, int backward)
+{
+    char text[200];
+    uint8_t pat[NESSEARCH_MAX], mask;
+    uint32_t found;
+    int count, flags, row;
+
+    edit_text(dbgwin->srch_entry, text, sizeof text);
+    if (!nessearch_parse((int)SendMessageA(dbgwin->srch_kind, CB_GETCURSEL, 0, 0), text, pat, &count, &mask, &flags)) {
+        set_label(dbgwin->srch_note, "Type hex bytes (3E 00) or some text.");
+        return;
+    }
+    if (!nesdebug_is_stopped(dbgwin->dbg)) {
+        set_label(dbgwin->srch_note, "Stop the machine to search its memory.");
+        return;
+    }
+    row = nesdebug_search_next_in(dbgwin->dbg, dbgwin->mem_space_id, pat, count, mask, flags,
+                                  (uint32_t)(dbgwin->mem_hl ? (backward ? dbgwin->mem_hl_lo : dbgwin->mem_hl_lo + 1) : dbgwin->mem_top),
+                                  backward, &found);
+    if (row > 0) {
+        char note[48];
+        snprintf(note, sizeof note, "Found at $%04X", (unsigned)found);
+        set_label(dbgwin->srch_note, note);
+        show_in_memory(dbgwin, (int)found, (int)found + count - 1);
+    } else {
+        set_label(dbgwin->srch_note, row < 0 ? "Stop the machine to search its memory." : "Not found.");
+    }
+}
+
+static int pick_file(debugger *dbgwin, int save, const char *title, const char *filter, char *path, DWORD pathsz)
 {
     OPENFILENAMEA ofn;
     memset(&ofn, 0, sizeof ofn);
     path[0] = '\0';
     ofn.lStructSize = sizeof ofn;
-    ofn.hwndOwner = d->hwnd;
+    ofn.hwndOwner = dbgwin->hwnd;
     ofn.lpstrFile = path;
     ofn.nMaxFile = pathsz;
     ofn.lpstrTitle = title;
     ofn.lpstrFilter = filter;
     if (save) {
-        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         return GetSaveFileNameA(&ofn) ? 1 : 0;
     }
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     return GetOpenFileNameA(&ofn) ? 1 : 0;
 }
 
-static void save_file(debugger *d, int which)
+static void on_symbols(debugger *dbgwin)
 {
-    char path[MAX_PATH], msg[512], title[64];
-    snprintf(title, sizeof title, "Save %s", kSaveTitles[which]);
-    if (!pick_file(d, 1, title, "All files\0*.*\0\0", path, sizeof path)) return;
-    nesdebug_save(d->dbg, kSaveKinds[which], path, msg, sizeof msg);
-    append_text_lf(d->prompt_out, msg);
-    append_text_lf(d->prompt_out, "\n");
+    char path[MAX_PATH], msg[512];
+    if (!pick_file(dbgwin, 0, "Load symbols",
+                   "Symbol files (*.dbg;*.lbl;*.mlb;*.sym;*.txt)\0*.dbg;*.lbl;*.mlb;*.sym;*.txt\0All files\0*.*\0\0",
+                   path, sizeof path))
+        return;
+    msg[0] = '\0';
+    if (nesdebug_load_symbols(dbgwin->dbg, path, msg, sizeof msg) < 0 && !msg[0])
+        snprintf(msg, sizeof msg, "No symbols found in %s", base_name(path));
+    say(dbgwin, msg);
+    resync(dbgwin);
 }
 
-static void save_menu(debugger *d)
+static void on_save(debugger *dbgwin, int which)
+{
+    char path[MAX_PATH], msg[512], title[64];
+    snprintf(title, sizeof title, "Save %s", k_save_titles[which]);
+    if (!pick_file(dbgwin, 1, title, "All files\0*.*\0\0", path, sizeof path)) return;
+    msg[0] = '\0';
+    nesdebug_save(dbgwin->dbg, k_save_kinds[which], path, msg, sizeof msg);
+    if (!msg[0]) snprintf(msg, sizeof msg, "Saved %s", base_name(path));
+    say(dbgwin, msg);
+}
+
+static void save_menu(debugger *dbgwin)
 {
     HMENU m = CreatePopupMenu();
-    RECT r;
-    int i;
-    for (i = 0; i < 5; i++) AppendMenuA(m, MF_STRING, (UINT_PTR)(IDC_SAVE_KIND0 + i), kSaveTitles[i]);
-    GetWindowRect(d->save, &r);
-    TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN, r.left, r.bottom, 0, d->hwnd, NULL);
+    RECT row;
+    int idx;
+    for (idx = 0; idx < NSAVE; idx++) AppendMenuA(m, MF_STRING, (UINT_PTR)(IDC_SAVE_KIND0 + idx), k_save_titles[idx]);
+    GetWindowRect(dbgwin->save_btn, &row);
+    TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN, row.left, row.bottom, 0, dbgwin->hwnd, NULL);
     DestroyMenu(m);
 }
 
-static void load_symbols(debugger *d)
+static void on_accept(debugger *dbgwin, int ctl_id)
 {
-    char path[MAX_PATH], msg[512];
-    if (!pick_file(d, 0, "Load symbols",
-                   "Symbol files (*.dbg;*.lbl;*.mlb;*.sym;*.labels)\0*.dbg;*.lbl;*.mlb;*.sym;*.labels\0All files\0*.*\0\0",
-                   path, sizeof path))
-        return;
-    nesdebug_load_symbols(d->dbg, path, msg, sizeof msg);
-    append_text_lf(d->prompt_out, msg);
-    append_text_lf(d->prompt_out, "\n");
-    refresh_all(d);
-}
-
-static void add_breakpoint(debugger *d)
-{
-    char a[64], b[64], cond[256];
-    static const int types[4] = { NESDEBUG_BP_EXEC, NESDEBUG_BP_READ, NESDEBUG_BP_WRITE,
-                                  NESDEBUG_BP_READ | NESDEBUG_BP_WRITE };
-    int start, end, sel, id;
-    edit_text(d->bp_start, a, sizeof a);
-    edit_text(d->bp_end, b, sizeof b);
-    edit_text(d->bp_cond, cond, sizeof cond);
-    start = resolve_addr(d, a);
-    if (start < 0) { MessageBoxA(d->hwnd, "The start is not an address or label.", "Breakpoint", MB_ICONWARNING); return; }
-    end = b[0] ? resolve_addr(d, b) : start;
-    if (end < start) end = start;
-    sel = (int)SendMessageA(d->bp_type, CB_GETCURSEL, 0, 0);
-    if (sel < 0 || sel > 3) sel = 0;
-    id = nesdebug_breakpoint_add(d->dbg, types[sel], (uint16_t)start, (uint16_t)end, cond);
-    if (id < 0) { MessageBoxA(d->hwnd, "The condition does not parse.", "Breakpoint", MB_ICONWARNING); return; }
-    set_text(d->bp_start, "");
-    set_text(d->bp_end, "");
-    set_text(d->bp_cond, "");
-    refresh_bps(d);
-    refresh_disasm(d);
-}
-
-static void on_accept(debugger *d, int id)
-{
-    char buf[512];
-    long v;
-
-    if (id >= IDC_REG0 && id <= IDC_REG_LAST) {
-        static const int reg_ids[6] = { NES_REG_PC, NES_REG_SP, NES_REG_A, NES_REG_X, NES_REG_Y, NES_REG_PS };
-        edit_text(d->reg_edit[id - IDC_REG0], buf, sizeof buf);
-        if (parse_num(buf, &v)) nesdebug_cpu_set(d->dbg, reg_ids[id - IDC_REG0], (int)v);
-        SetFocus(d->hwnd);
-        refresh_all(d);
+    if (ctl_id >= IDC_REG0 && ctl_id <= IDC_REG_LAST) {
+        on_reg(dbgwin, ctl_id - IDC_REG0);
         return;
     }
-    switch (id) {
-    case IDC_PROMPT_IN: run_prompt(d); break;
-    case IDC_RAM_ADDR:
-    case IDC_RAM_VAL: {
-        char abuf[64];
-        int a;
-        edit_text(d->ram_addr, abuf, sizeof abuf);
-        edit_text(d->ram_val, buf, sizeof buf);
-        a = resolve_addr(d, abuf);
-        if (a >= 0 && parse_num(buf, &v)) nesdebug_write(d->dbg, (uint16_t)a, (uint8_t)v);
-        refresh_all(d);
-        break;
-    }
-    case IDC_JUMP:
-        edit_text(d->jump, buf, sizeof buf);
-        jump_to(d, buf);
-        break;
+    switch (ctl_id) {
+    case IDC_CON_IN: on_console(dbgwin); break;
+    case IDC_MEM_GOTO: on_mem_goto(dbgwin); break;
+    case IDC_MEM_WRITE: on_mem_write(dbgwin); break;
+    case IDC_SRCH_ENTRY: do_search(dbgwin, 0); break;
+    case IDC_JUMP: on_jump(dbgwin); break;
+    case IDC_BREAK_AT: on_break_at(dbgwin); break;
     case IDC_BP_START:
     case IDC_BP_END:
-    case IDC_BP_COND:
-        add_breakpoint(d);
-        break;
+    case IDC_BP_COND: on_bp_add(dbgwin); break;
+    case IDC_BP_EDIT: on_bp_set(dbgwin); break;
+    case IDC_WT_ENTRY: add_watch(dbgwin); break;
+    case IDC_SYM_FILTER: refresh_symbols(dbgwin); break;
+    case IDC_H_RANGE0: hist_refresh(dbgwin, 0, 1); break;
+    case IDC_H_RANGE1: hist_refresh(dbgwin, 1, 1); break;
     default: break;
     }
 }
 
-/* ---- the PPU picture --------------------------------------------------------------- */
+/* ---- the disassembly -------------------------------------------------------------- */
 
-static LRESULT CALLBACK pic_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+/* Drawn by hand, one row per line: the breakpoint gutter (a red dot when the
+ * breakpoint is enabled, grey when disabled), address, bytes, label,
+ * instruction, and the comment (a jump target's label) in grey. The PC's
+ * line is filled with the accent, the selected one with the selection
+ * colour. */
+static void paint_disasm(debugger *dbgwin, HWND hwnd, HDC dc)
 {
-    debugger *d = g_dbg;
-    if (msg == WM_PAINT) {
+    RECT cur;
+    int idx;
+    const int gutter = scaled(dbgwin, GUTTER_W);
+    GetClientRect(hwnd, &cur);
+    FillRect(dc, &cur, GetSysColorBrush(COLOR_WINDOW));
+    SelectObject(dc, dbgwin->mono);
+    SetBkMode(dc, TRANSPARENT);
+    if (dbgwin->line_count == 0) {
+        SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        TextOutA(dc, gutter, 0, "(no disassembly)", 16);
+        return;
+    }
+    for (idx = 0; idx < dbgwin->line_count && idx * dbgwin->line_h < cur.bottom; idx++) {
+        const nesdebug_line *l = &dbgwin->lines[idx];
+        const int pos_y = idx * dbgwin->line_h, ty = pos_y + (dbgwin->line_h - dbgwin->mono_h) / 2;
+        const int is_pc = l->is_pc, sel = l->address == dbgwin->selected;
+        COLORREF fg = GetSysColor(COLOR_WINDOWTEXT);
+        RECT row;
+        char text[240];
+        int len;
+        SetRect(&row, 0, pos_y, cur.right, pos_y + dbgwin->line_h);
+        if (is_pc) {
+            const int contrast = high_contrast();
+            FillRect(dc, &row, contrast ? GetSysColorBrush(COLOR_HIGHLIGHT) : dbgwin->accent);
+            fg = contrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : INK_RGB;
+        } else if (sel) {
+            FillRect(dc, &row, GetSysColorBrush(COLOR_HIGHLIGHT));
+            fg = GetSysColor(COLOR_HIGHLIGHTTEXT);
+        }
+        if (l->has_breakpoint) {
+            const int size = dbgwin->line_h - scaled(dbgwin, 6) > 4 ? dbgwin->line_h - scaled(dbgwin, 6) : 4;
+            HGDIOBJ oldb = SelectObject(dc, l->breakpoint_enabled ? dbgwin->bp_on : dbgwin->bp_off);
+            HGDIOBJ oldp = SelectObject(dc, is_pc ? GetStockObject(WHITE_PEN) : GetStockObject(NULL_PEN));
+            Ellipse(dc, scaled(dbgwin, 4), pos_y + (dbgwin->line_h - size) / 2, scaled(dbgwin, 4) + size + 1, pos_y + (dbgwin->line_h - size) / 2 + size + 1);
+            SelectObject(dc, oldp);
+            SelectObject(dc, oldb);
+        }
+        len = snprintf(text, sizeof text, "%04X  %-12.12s %-18.18s %s", l->address, l->bytes, l->label, l->disasm);
+        if (len > (int)sizeof text - 1) len = (int)sizeof text - 1;
+        if (len < 0) len = 0;
+        SetTextColor(dc, fg);
+        TextOutA(dc, gutter, ty, text, len);
+        if (l->comment[0]) {
+            len = snprintf(text, sizeof text, "; %s", l->comment);
+            if (len > (int)sizeof text - 1) len = (int)sizeof text - 1;
+            if (!is_pc && !sel) SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            TextOutA(dc, gutter + dbgwin->mono_w * COMMENT_COL, ty, text, len);
+        }
+    }
+}
+
+/* A click selects a line (it works while the machine runs, too); a click on
+ * the gutter, or a double-click, toggles its breakpoint. The wheel and the
+ * keys browse by instructions (and turn Follow PC off). */
+static LRESULT CALLBACK disasm_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    debugger *dbgwin = g_dbg;
+    if (!dbgwin) return DefWindowProcA(hwnd, msg, wparam, lparam);
+    switch (msg) {
+    case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
-        RECT c;
-        GetClientRect(hwnd, &c);
-        FillRect(dc, &c, (HBRUSH)GetStockObject(DKGRAY_BRUSH));
-        if (d && d->pic_px && d->pic_w > 0 && d->pic_h > 0) {
-            BITMAPINFO bmi;
-            int scale = 2, w, h;
-            /* 2x nearest when it fits, else 1x: a tile's pixels stay whole */
-            if (d->pic_w * 2 > c.right || d->pic_h * 2 > c.bottom) scale = 1;
-            w = d->pic_w * scale;
-            h = d->pic_h * scale;
-            memset(&bmi, 0, sizeof bmi);
-            bmi.bmiHeader.biSize = sizeof bmi.bmiHeader;
-            bmi.bmiHeader.biWidth = d->pic_w;
-            bmi.bmiHeader.biHeight = -d->pic_h;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-            SetStretchBltMode(dc, COLORONCOLOR);
-            StretchDIBits(dc, (c.right - w) / 2 > 0 ? (c.right - w) / 2 : 0, 0, w, h,
-                          0, 0, d->pic_w, d->pic_h, d->pic_px, &bmi, DIB_RGB_COLORS, SRCCOPY);
-        }
+        RECT cur;
+        HDC mem;
+        HBITMAP bmp;
+        HGDIOBJ oldbmp, oldfont;
+        GetClientRect(hwnd, &cur);
+        mem = CreateCompatibleDC(dc);
+        bmp = CreateCompatibleBitmap(dc, cur.right > 0 ? cur.right : 1, cur.bottom > 0 ? cur.bottom : 1);
+        oldbmp = SelectObject(mem, bmp);
+        oldfont = SelectObject(mem, dbgwin->mono);
+        paint_disasm(dbgwin, hwnd, mem);
+        BitBlt(dc, 0, 0, cur.right, cur.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, oldfont);
+        SelectObject(mem, oldbmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         EndPaint(hwnd, &ps);
         return 0;
     }
-    if (msg == WM_ERASEBKGND) return 1;
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    case WM_PRINTCLIENT:
+        paint_disasm(dbgwin, hwnd, (HDC)wparam);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        /* more or fewer rows fit now */
+        if (dbgwin->disasm == hwnd && page_visible(dbgwin, TAB_DISASM)) refresh_disasm(dbgwin);
+        return 0;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: {
+        const int line = dbgwin->line_h > 0 ? GET_Y_LPARAM(lparam) / dbgwin->line_h : -1;
+        const int gutter = GET_X_LPARAM(lparam) < scaled(dbgwin, GUTTER_W);
+        SetFocus(hwnd);
+        if (line < 0 || line >= dbgwin->line_count) return 0;
+        dbgwin->selected = dbgwin->lines[line].address;
+        if (gutter ? msg == WM_LBUTTONDOWN : msg == WM_LBUTTONDBLCLK)
+            toggle_breakpoint(dbgwin, dbgwin->lines[line].address);
+        else
+            InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+        int rows = -delta * 3 / WHEEL_DELTA;
+        if (!rows) rows = delta > 0 ? -1 : 1;
+        SendMessageA(dbgwin->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
+        dbgwin->disasm_top = row_address(dbgwin, dbgwin->disasm_top, rows);
+        refresh_disasm(dbgwin);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wparam == VK_PRIOR || wparam == VK_NEXT || wparam == VK_UP || wparam == VK_DOWN) {
+            const int half = disasm_rows(dbgwin) / 2 > 0 ? disasm_rows(dbgwin) / 2 : 1;
+            const int rows = wparam == VK_PRIOR ? -half : wparam == VK_NEXT ? half : wparam == VK_UP ? -1 : 1;
+            SendMessageA(dbgwin->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
+            dbgwin->disasm_top = row_address(dbgwin, dbgwin->disasm_top, rows);
+            refresh_disasm(dbgwin);
+            return 0;
+        }
+        break;
+    default: break;
+    }
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
 }
 
 /* ---- edit subclassing ------------------------------------------------------------- */
 
 static WNDPROC g_edit_proc;
-static WNDPROC g_disasm_proc;
 
-/* Enter in a single-line field means "apply this value"; Tab in the prompt
- * completes. Neither may beep its way through the default handler. */
-static LRESULT CALLBACK edit_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+/* Enter in a single-line field means "apply this value"; Tab in the console
+ * completes and Up/Down recall. None may beep its way through the default
+ * handler. The notifications go to the debugger window, whatever window the
+ * field's tab is in. */
+static LRESULT CALLBACK edit_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    const int id = (int)GetWindowLongPtrA(hwnd, GWLP_ID);
-    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
-        PostMessageA(GetAncestor(hwnd, GA_ROOT), WM_DBG_ACCEPT, (WPARAM)id, 0);
+    const int ctl_id = (int)GetWindowLongPtrA(hwnd, GWLP_ID);
+    HWND main = g_dbg ? g_dbg->hwnd : GetAncestor(hwnd, GA_ROOT);
+    if (msg == WM_KEYDOWN && wparam == VK_RETURN) {
+        PostMessageA(main, WM_DBG_ACCEPT, (WPARAM)ctl_id, 0);
         return 0;
     }
-    if (msg == WM_CHAR && wp == VK_RETURN) return 0;
-    if (id == IDC_PROMPT_IN && msg == WM_KEYDOWN && wp == VK_TAB) {
-        PostMessageA(GetAncestor(hwnd, GA_ROOT), WM_DBG_TAB, 0, 0);
-        return 0;
-    }
-    if (id == IDC_PROMPT_IN && msg == WM_CHAR && wp == VK_TAB) return 0;
-    if (id == IDC_PROMPT_IN && msg == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
-    return CallWindowProcA(g_edit_proc, hwnd, msg, wp, lp);
-}
-
-/* A click in the disassembly toggles the breakpoint on that line; the
- * wheel browses (and turns Follow PC off, as in the other frontends). */
-static LRESULT CALLBACK disasm_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    debugger *d = g_dbg;
-    if (!d) return CallWindowProcA(g_disasm_proc, hwnd, msg, wp, lp);
-    if (msg == WM_LBUTTONDOWN) {
-        LRESULT pos = SendMessageA(hwnd, EM_CHARFROMPOS, 0, lp);
-        int line = HIWORD(pos);
-        if (line >= 0 && line < d->line_count) {
-            nesdebug_breakpoint_toggle(d->dbg, d->line_addr[line]);
-            refresh_disasm(d);
-            refresh_bps(d);
+    if (msg == WM_CHAR && (wparam == '\r' || wparam == '\n')) return 0;
+    if (ctl_id == IDC_CON_IN) {
+        if (msg == WM_KEYDOWN && wparam == VK_TAB) {
+            PostMessageA(main, WM_DBG_TAB, 0, 0);
+            return 0;
         }
-        return 0;
+        if (msg == WM_KEYDOWN && (wparam == VK_UP || wparam == VK_DOWN)) {
+            PostMessageA(main, WM_DBG_HISTORY, wparam == VK_DOWN, 0);
+            return 0;
+        }
+        if (msg == WM_CHAR && wparam == VK_TAB) return 0;
+        if (msg == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
     }
-    if (msg == WM_LBUTTONDBLCLK || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP) return 0;
-    if (msg == WM_MOUSEWHEEL) {
-        int rows = -GET_WHEEL_DELTA_WPARAM(wp) / 40;
-        SendMessageA(d->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
-        if (rows) d->disasm_top = nesdebug_row_address(d->dbg, (uint16_t)d->disasm_top, rows);
-        refresh_disasm(d);
-        return 0;
+    return CallWindowProcA(g_edit_proc, hwnd, msg, wparam, lparam);
+}
+
+/* ---- construction ----------------------------------------------------------------- */
+
+static HWND child_ex(debugger *dbgwin, DWORD ex_style, const char *cls, const char *text, DWORD style, int ctl_id, HFONT font)
+{
+    HWND hwnd = CreateWindowExA(ex_style, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10,
+                             dbgwin->new_parent ? dbgwin->new_parent : dbgwin->hwnd, (HMENU)(INT_PTR)ctl_id,
+                             (HINSTANCE)GetWindowLongPtrA(dbgwin->hwnd, GWLP_HINSTANCE), NULL);
+    SendMessageA(hwnd, WM_SETFONT, (WPARAM)font, TRUE);
+    return hwnd;
+}
+
+static HWND child(debugger *dbgwin, const char *cls, const char *text, DWORD style, int ctl_id, HFONT font)
+{
+    return child_ex(dbgwin, 0, cls, text, style, ctl_id, font);
+}
+
+/* A read-only monospace text view. */
+static HWND view(debugger *dbgwin, int ctl_id, DWORD extra)
+{
+    HWND hwnd = child(dbgwin, "EDIT", "", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | extra,
+                   ctl_id, dbgwin->mono);
+    SendMessageA(hwnd, EM_SETLIMITTEXT, 0, 0);
+    if (dbgwin->nviews < (int)(sizeof dbgwin->views / sizeof dbgwin->views[0])) dbgwin->views[dbgwin->nviews++] = hwnd;
+    return hwnd;
+}
+
+static HWND field(debugger *dbgwin, int ctl_id, const wchar_t *cue)
+{
+    HWND hwnd = child(dbgwin, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, ctl_id, dbgwin->mono);
+    g_edit_proc = (WNDPROC)SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)edit_subclass);
+    if (cue) SendMessageW(hwnd, EM_SETCUEBANNER, TRUE, (LPARAM)cue);
+    return hwnd;
+}
+
+static HWND label(debugger *dbgwin, const char *text, HFONT font, DWORD style)
+{
+    return child(dbgwin, "STATIC", text, style | SS_NOPREFIX, IDC_LABEL_FIRST + dbgwin->nlabels++, font);
+}
+
+/* A caption or hint, drawn grey. */
+static HWND dim_label(debugger *dbgwin, const char *text, DWORD style)
+{
+    HWND hwnd = label(dbgwin, text, dbgwin->ui_font, style);
+    if (dbgwin->ndim < (int)(sizeof dbgwin->dim / sizeof dbgwin->dim[0])) dbgwin->dim[dbgwin->ndim++] = hwnd;
+    return hwnd;
+}
+
+static HWND button(debugger *dbgwin, const char *text, int ctl_id)
+{
+    return child(dbgwin, "BUTTON", text, BS_PUSHBUTTON | WS_TABSTOP, ctl_id, dbgwin->ui_font);
+}
+
+static HWND checkbox(debugger *dbgwin, const char *text, int ctl_id)
+{
+    return child(dbgwin, "BUTTON", text, BS_AUTOCHECKBOX | WS_TABSTOP, ctl_id, dbgwin->ui_font);
+}
+
+static HWND combo(debugger *dbgwin, int ctl_id)
+{
+    return child(dbgwin, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ctl_id, dbgwin->ui_font);
+}
+
+/* A list box of lines in the monospace font. */
+static HWND list_box(debugger *dbgwin, int ctl_id)
+{
+    return child_ex(dbgwin, WS_EX_CLIENTEDGE, "LISTBOX", "", WS_VSCROLL | WS_HSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                    ctl_id, dbgwin->mono);
+}
+
+static void size_columns(debugger *dbgwin)
+{
+    static const int widths[5] = { 70, 90, 150, 380, 80 };
+    int idx;
+    for (idx = 0; idx < 5; idx++)
+        SendMessageA(dbgwin->bp_list, LVM_SETCOLUMNWIDTH, (WPARAM)idx, scaled(dbgwin, widths[idx]));
+}
+
+/* A tab control reads '&' as a mnemonic, so the label's own is doubled. */
+static const char *tab_text(int page, char *buf, size_t cap)
+{
+    const char *in = k_tabs[page].label;
+    size_t outbuf = 0;
+    for (; *in && outbuf + 3 < cap; in++) {
+        buf[outbuf++] = *in;
+        if (*in == '&') buf[outbuf++] = '&';
     }
-    if (msg == WM_KEYDOWN && (wp == VK_PRIOR || wp == VK_NEXT || wp == VK_UP || wp == VK_DOWN)) {
-        int rows = wp == VK_PRIOR ? -DISASM_WINDOW / 2 : wp == VK_NEXT ? DISASM_WINDOW / 2 : wp == VK_UP ? -1 : 1;
-        SendMessageA(d->follow_pc, BM_SETCHECK, BST_UNCHECKED, 0);
-        d->disasm_top = nesdebug_row_address(d->dbg, (uint16_t)d->disasm_top, rows);
-        refresh_disasm(d);
-        return 0;
-    }
-    return CallWindowProcA(g_disasm_proc, hwnd, msg, wp, lp);
+    buf[outbuf] = '\0';
+    return buf;
 }
 
-/* ---- construction ------------------------------------------------------------------ */
-
-static HWND child(debugger *d, const char *cls, const char *text, DWORD style, int id, HFONT font)
+static void build_controls(debugger *dbgwin)
 {
-    HWND h = CreateWindowExA(0, cls, text, WS_CHILD | style, 0, 0, 10, 10, d->hwnd,
-                             (HMENU)(INT_PTR)id, (HINSTANCE)GetWindowLongPtrA(d->hwnd, GWLP_HINSTANCE), NULL);
-    SendMessageA(h, WM_SETFONT, (WPARAM)font, TRUE);
-    return h;
-}
-
-static HWND mono_view(debugger *d, int id, int wrap)
-{
-    return child(d, "EDIT", "",
-                 WS_BORDER | WS_VSCROLL | (wrap ? 0 : WS_HSCROLL) | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                 id, d->mono);
-}
-
-/* A read-only view that takes Unicode text (set_text_at). */
-static HWND wide_view(debugger *d, int id)
-{
-    HWND h = CreateWindowExW(0, L"EDIT", L"",
-                             WS_CHILD | WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                             0, 0, 10, 10, d->hwnd, (HMENU)(INT_PTR)id,
-                             (HINSTANCE)GetWindowLongPtrA(d->hwnd, GWLP_HINSTANCE), NULL);
-    SendMessageW(h, WM_SETFONT, (WPARAM)d->mono, TRUE);
-    SendMessageW(h, EM_SETLIMITTEXT, 0, 0);
-    return h;
-}
-
-static HWND field(debugger *d, int id, HFONT font)
-{
-    HWND h = child(d, "EDIT", "", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, id, font);
-    g_edit_proc = (WNDPROC)SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)edit_subclass);
-    return h;
-}
-
-static HWND label(debugger *d, const char *text)
-{
-    static int next_id;
-    return child(d, "STATIC", text, SS_LEFT, IDC_LABEL_FIRST + next_id++, d->ui);
-}
-
-static HWND button(debugger *d, const char *text, int id)
-{
-    return child(d, "BUTTON", text, BS_PUSHBUTTON | WS_TABSTOP, id, d->ui);
-}
-
-static HWND checkbox(debugger *d, const char *text, int id)
-{
-    return child(d, "BUTTON", text, BS_AUTOCHECKBOX | WS_TABSTOP, id, d->ui);
-}
-
-static HWND combo(debugger *d, int id, const char *const *items, int n)
-{
-    HWND c = child(d, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, id, d->ui);
-    int i;
-    for (i = 0; i < n; i++) SendMessageA(c, CB_ADDSTRING, 0, (LPARAM)items[i]);
-    SendMessageA(c, CB_SETCURSEL, 0, 0);
-    return c;
-}
-
-static void build_controls(debugger *d)
-{
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrA(dbgwin->hwnd, GWLP_HINSTANCE);
     TCITEMA item;
-    static const char *const tabs[PAGE_COUNT] = { "Prompt", "CPU && RAM", "Disassembly", "PPU",
-                                                  "APU && Input", "Breakpoints", "Cart", "FujiNet" };
-    static const char *const reg_names[6] = { "PC", "SP", "A", "X", "Y", "P" };
-    static const char *const flag_names[6] = { "N", "V", "D", "I", "Z", "C" };
-    static const char *const views[4] = { "Nametables", "Patterns", "Sprites", "Palette" };
-    static const char *const pals[8] = { "BG 0", "BG 1", "BG 2", "BG 3", "Sprite 0", "Sprite 1", "Sprite 2", "Sprite 3" };
-    static const char *const bp_types[4] = { "Execute", "Read", "Write", "Read/Write" };
-    int i;
+    int idx;
 
-    d->tabs = child(d, WC_TABCONTROLA, "", WS_VISIBLE | WS_CLIPSIBLINGS, IDC_TABS, d->ui);
+    dbgwin->tabs = child(dbgwin, WC_TABCONTROLA, "", WS_CLIPSIBLINGS | WS_TABSTOP, IDC_TABS, dbgwin->ui_font);
     memset(&item, 0, sizeof item);
     item.mask = TCIF_TEXT;
-    for (i = 0; i < PAGE_COUNT; i++) {
-        item.pszText = (char *)tabs[i];
-        SendMessageA(d->tabs, TCM_INSERTITEMA, (WPARAM)i, (LPARAM)&item);
+    for (idx = 0; idx < TAB_COUNT; idx++) {
+        char text[40];
+        item.pszText = (char *)tab_text(idx, text, sizeof text);
+        SendMessageA(dbgwin->tabs, TCM_INSERTITEMA, (WPARAM)idx, (LPARAM)&item);
+        dbgwin->tab_page[idx] = idx;
+    }
+    dbgwin->ntabs = TAB_COUNT;
+    for (idx = 0; idx < TAB_COUNT; idx++) {       /* a container per tab: its controls are its children */
+        dbgwin->pages[idx] = CreateWindowExA(0, PAGE_CLASS, "", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 10, 10, dbgwin->hwnd,
+                                   NULL, inst, NULL);
+        SetWindowLongPtrA(dbgwin->pages[idx], GWLP_USERDATA, (LONG_PTR)dbgwin->hwnd);
     }
 
-    /* Toolbar. Run/Stop is owner-drawn so it can wear the accent colour
+    /* The toolbar. Run/Stop is owner-drawn so it can wear the accent colour
      * while the machine is stopped. */
-    d->run_btn = child(d, "BUTTON", "Stop (F5)", BS_OWNERDRAW | WS_TABSTOP, IDC_RUN, d->ui);
-    d->step_btn = button(d, "Step (F7)", IDC_STEP);
-    d->over_btn = button(d, "Over (F8)", IDC_OVER);
-    d->out_btn = button(d, "Out (Shift+F8)", IDC_OUT);
-    d->scan_btn = button(d, "Scanline+1", IDC_SCAN);
-    d->frame_btn = button(d, "Frame+1", IDC_FRAME);
-    d->status = child(d, "STATIC", "Running", SS_RIGHT | SS_ENDELLIPSIS, IDC_STATUS, d->ui);
-    d->help_btn = button(d, "Help", IDC_HELP_BTN);
-    {
-        HWND bar[8] = { d->run_btn, d->step_btn, d->over_btn, d->out_btn, d->scan_btn, d->frame_btn, d->status,
-                        d->help_btn };
-        for (i = 0; i < 8; i++) ShowWindow(bar[i], SW_SHOW);
-    }
+    dbgwin->run_btn = child(dbgwin, "BUTTON", "Stop (F5)", BS_OWNERDRAW | WS_TABSTOP, IDC_RUN, dbgwin->ui_font);
+    dbgwin->step_btn = button(dbgwin, "Step (F7)", IDC_STEP);
+    dbgwin->over_btn = button(dbgwin, "Step Over (F8)", IDC_OVER);
+    dbgwin->out_btn = button(dbgwin, "Step Out (Shift+F8)", IDC_OUT);
+    dbgwin->run_to_btn = button(dbgwin, "Run to Cursor", IDC_RUN_TO);
+    dbgwin->scan_btn = button(dbgwin, "Scanline", IDC_SCAN);
+    dbgwin->frame_btn = button(dbgwin, "Frame (Shift+F7)", IDC_FRAME);
+    dbgwin->sym_btn = button(dbgwin, "Symbols...", IDC_SYMBOLS);
+    dbgwin->save_btn = button(dbgwin, "Save...", IDC_SAVE);
+    dbgwin->popout_btn = button(dbgwin, "Pop Out", IDC_POPOUT);
+    dbgwin->help_btn = button(dbgwin, "Help", IDC_HELP_BTN);
+    dbgwin->status = child(dbgwin, "STATIC", "", SS_RIGHT | SS_ENDELLIPSIS | SS_NOPREFIX, IDC_STATUS, dbgwin->ui_font);
+    if (dbgwin->ndim < (int)(sizeof dbgwin->dim / sizeof dbgwin->dim[0])) dbgwin->dim[dbgwin->ndim++] = dbgwin->status;
 
-    /* Prompt */
-    d->prompt_out = mono_view(d, IDC_PROMPT_OUT, 1);
-    set_text(d->prompt_out, "NES debugger prompt. Type 'help' for every command.\r\n");
-    d->prompt_in = field(d, IDC_PROMPT_IN, d->mono);
-    SendMessageA(d->prompt_in, EM_SETCUEBANNER, TRUE,
-                 (LPARAM)L"command (help, step, break, bpw, print, mem, runto, ...) - Tab completes");
-    d->load_symbols = button(d, "Load symbols...", IDC_LOAD_SYMBOLS);
-    d->save = button(d, "Save...", IDC_SAVE);
-
-    /* CPU & RAM */
-    for (i = 0; i < 6; i++) {
-        d->reg_label[i] = label(d, reg_names[i]);
-        d->reg_edit[i] = field(d, IDC_REG0 + i, d->mono);
-        SendMessageA(d->reg_edit[i], EM_SETLIMITTEXT, 6, 0);
+    /* The register strip, under every tab. */
+    for (idx = 0; idx < NREGS; idx++) {
+        dbgwin->reg_label[idx] = dim_label(dbgwin, k_reg_names[idx], SS_RIGHT);
+        dbgwin->reg[idx] = field(dbgwin, IDC_REG0 + idx, NULL);
+        SendMessageA(dbgwin->reg[idx], EM_SETLIMITTEXT, 8, 0);
     }
-    for (i = 0; i < 6; i++) d->flag[i] = checkbox(d, flag_names[i], IDC_FLAG0 + i);
-    d->cycles = label(d, "");
-    d->ram_label = label(d, "Console RAM ($0000-$07FF)");
-    d->ram_view = mono_view(d, IDC_RAM_VIEW, 0);
-    d->ram_addr_label = label(d, "Write address");
-    d->ram_addr = field(d, IDC_RAM_ADDR, d->mono);
-    d->ram_val_label = label(d, "value");
-    d->ram_val = field(d, IDC_RAM_VAL, d->mono);
+    for (idx = 0; idx < NCHECKS; idx++) dbgwin->chk[idx] = checkbox(dbgwin, k_chk_names[idx], IDC_CHK0 + idx);
+    dbgwin->beam_label = dim_label(dbgwin, "", SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->irq_label = dim_label(dbgwin, "", SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->cpu_hint = dim_label(dbgwin, "Enter sets a register (hex, # decimal or an expression); they change only while the machine is stopped.",
+                            SS_LEFT | SS_ENDELLIPSIS);
+
+    /* Console */
+    dbgwin->new_parent = dbgwin->pages[TAB_CONSOLE];
+    dbgwin->con_out = view(dbgwin, IDC_CON_OUT, 0);
+    SetWindowTextA(dbgwin->con_out, "NES debugger console (MesenCE). Type 'help' for every command; Tab completes, Up/Down "
+                               "recall.\r\n");
+    dbgwin->con_prompt = child(dbgwin, "STATIC", ">", SS_LEFT, IDC_CON_PROMPT, dbgwin->mono);
+    dbgwin->con_in = field(dbgwin, IDC_CON_IN, L"help, step, over, break C000, bpw 2000 value == $90, mem 0300, ppu 2000, watch, video, ...");
 
     /* Disassembly */
-    d->follow_pc = checkbox(d, "Follow PC", IDC_FOLLOW_PC);
-    SendMessageA(d->follow_pc, BM_SETCHECK, BST_CHECKED, 0);
-    d->jump_label = label(d, "Jump to");
-    d->jump = field(d, IDC_JUMP, d->mono);
-    d->disasm_hint = label(d, "Click a line to toggle its breakpoint; scroll to browse");
-    d->disasm = child(d, "EDIT", "", WS_BORDER | ES_MULTILINE | ES_READONLY | ES_NOHIDESEL,
-                      IDC_DISASM, d->mono);
-    g_disasm_proc = (WNDPROC)SetWindowLongPtrA(d->disasm, GWLP_WNDPROC, (LONG_PTR)disasm_subclass);
+    dbgwin->new_parent = dbgwin->pages[TAB_DISASM];
+    dbgwin->follow_pc = checkbox(dbgwin, "Follow PC", IDC_FOLLOW_PC);
+    SendMessageA(dbgwin->follow_pc, BM_SETCHECK, BST_CHECKED, 0);
+    dbgwin->jump_label = dim_label(dbgwin, "Jump to", SS_LEFT);
+    dbgwin->jump = field(dbgwin, IDC_JUMP, L"C000 or a label");
+    dbgwin->break_label = dim_label(dbgwin, "Break at", SS_LEFT);
+    dbgwin->break_at = field(dbgwin, IDC_BREAK_AT, L"C000 or a label");
+    dbgwin->disasm_hint = dim_label(dbgwin, "Click a line to select it (Run to Cursor); click the gutter, double-click or "
+                                  "press F9 for a breakpoint; scroll to browse",
+                               SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->disasm = CreateWindowExA(WS_EX_CLIENTEDGE, DISASM_CLASS, "", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 10, 10,
+                                dbgwin->pages[TAB_DISASM], (HMENU)(INT_PTR)IDC_DISASM, inst, NULL);
 
-    /* PPU */
-    d->ppu_text = mono_view(d, IDC_PPU_TEXT, 1);
-    d->ppu_view_label = label(d, "View");
-    d->ppu_view = combo(d, IDC_PPU_VIEW, views, 4);
-    d->ppu_pal_label = label(d, "Palette");
-    d->ppu_palette = combo(d, IDC_PPU_PALETTE, pals, 8);
-    d->ppu_pic = child(d, "NESDbgPixels", "", 0, IDC_PPU_PIC, d->ui);
-    d->oam = mono_view(d, IDC_OAM, 0);
-
-    /* APU & Input */
-    d->apu = mono_view(d, IDC_APU, 1);
+    /* Memory: Go to, Write (poke), the search, the dump */
+    dbgwin->new_parent = dbgwin->pages[TAB_MEMORY];
+    dbgwin->space_label = dim_label(dbgwin, "Space", SS_LEFT);
+    dbgwin->mem_space = combo(dbgwin, IDC_MEM_SPACE);
+    for (idx = 0; idx < NESDEBUG_SPACE_COUNT; idx++) SendMessageA(dbgwin->mem_space, CB_ADDSTRING, 0, (LPARAM)nesdebug_space_name(idx));
+    SendMessageA(dbgwin->mem_space, CB_SETCURSEL, 0, 0);
+    dbgwin->goto_label = dim_label(dbgwin, "Go to", SS_LEFT);
+    dbgwin->mem_goto = field(dbgwin, IDC_MEM_GOTO, L"C000 / label / C000-C0FF");
+    dbgwin->mem_back = button(dbgwin, "Back 4K", IDC_MEM_BACK);
+    dbgwin->mem_on = button(dbgwin, "On 4K", IDC_MEM_ON);
+    dbgwin->write_label = dim_label(dbgwin, "Poke", SS_LEFT);
+    dbgwin->mem_write = field(dbgwin, IDC_MEM_WRITE, L"address value [value...]");
+    dbgwin->srch_label = dim_label(dbgwin, "Search", SS_LEFT);
+    dbgwin->srch_kind = combo(dbgwin, IDC_SRCH_KIND);
+    SendMessageA(dbgwin->srch_kind, CB_ADDSTRING, 0, (LPARAM)"Hex bytes");
+    SendMessageA(dbgwin->srch_kind, CB_ADDSTRING, 0, (LPARAM)"Text");
+    SendMessageA(dbgwin->srch_kind, CB_SETCURSEL, 0, 0);
+    dbgwin->srch_entry = field(dbgwin, IDC_SRCH_ENTRY, L"A9 00 / ABC");
+    dbgwin->srch_next = button(dbgwin, "Find Next", IDC_SRCH_NEXT);
+    dbgwin->srch_prev = button(dbgwin, "Find Previous", IDC_SRCH_PREV);
+    dbgwin->srch_note = dim_label(dbgwin, "", SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->mem_view = view(dbgwin, IDC_MEM_VIEW, WS_HSCROLL | ES_NOHIDESEL);
 
     /* Breakpoints */
-    d->bp_list = child(d, "LISTBOX", "", WS_BORDER | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP, IDC_BP_LIST, d->mono);
-    d->bp_type = combo(d, IDC_BP_TYPE, bp_types, 4);
-    d->bp_start_label = label(d, "Address");
-    d->bp_start = field(d, IDC_BP_START, d->mono);
-    d->bp_end_label = label(d, "to");
-    d->bp_end = field(d, IDC_BP_END, d->mono);
-    d->bp_cond_label = label(d, "if");
-    d->bp_cond = field(d, IDC_BP_COND, d->mono);
-    SendMessageA(d->bp_cond, EM_SETCUEBANNER, TRUE, (LPARAM)L"optional condition, e.g. a == $FF");
-    d->bp_add = button(d, "Add", IDC_BP_ADD);
-    d->bp_remove = button(d, "Remove", IDC_BP_REMOVE);
-    d->bp_enable = button(d, "Enable/Disable", IDC_BP_ENABLE);
-    d->bp_clear = button(d, "Clear all", IDC_BP_CLEAR);
+    dbgwin->new_parent = dbgwin->pages[TAB_BREAKS];
+    dbgwin->bp_hint = dim_label(dbgwin, "Click a disassembly line's gutter to set an execute breakpoint; the box enables it; "
+                                   "select a row to edit its condition.",
+                           SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->bp_remove = button(dbgwin, "Remove", IDC_BP_REMOVE);
+    dbgwin->bp_hits = button(dbgwin, "Clear Hits", IDC_BP_HITS);
+    dbgwin->bp_clear = button(dbgwin, "Clear All", IDC_BP_CLEAR);
+    dbgwin->bp_list = child_ex(dbgwin, WS_EX_CLIENTEDGE, WC_LISTVIEWA, "",
+                          WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | LVS_NOSORTHEADER,
+                          IDC_BP_LIST, dbgwin->mono);
+    SendMessageA(dbgwin->bp_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+    {
+        static const char *const cols[5] = { "#", "Type", "Range", "Condition", "Hits" };
+        LVCOLUMNA col;
+        memset(&col, 0, sizeof col);
+        col.mask = LVCF_TEXT;
+        for (idx = 0; idx < 5; idx++) {
+            col.pszText = (char *)cols[idx];
+            SendMessageA(dbgwin->bp_list, LVM_INSERTCOLUMNA, (WPARAM)idx, (LPARAM)&col);
+        }
+        size_columns(dbgwin);
+    }
+    dbgwin->bp_empty = dim_label(dbgwin, "No breakpoints. Click the gutter of a disassembly line, or add one below.", SS_CENTER);
+    dbgwin->bp_type = combo(dbgwin, IDC_BP_TYPE);
+    for (idx = 0; idx < NBPTYPES; idx++) SendMessageA(dbgwin->bp_type, CB_ADDSTRING, 0, (LPARAM)k_bp_types[idx]);
+    SendMessageA(dbgwin->bp_type, CB_SETCURSEL, 0, 0);
+    dbgwin->bp_space = combo(dbgwin, IDC_BP_SPACE);
+    for (idx = 0; idx < NBPSPACES; idx++) SendMessageA(dbgwin->bp_space, CB_ADDSTRING, 0, (LPARAM)nesdebug_space_name(k_bp_space_ids[idx]));
+    SendMessageA(dbgwin->bp_space, CB_SETCURSEL, 0, 0);
+    dbgwin->bp_start = field(dbgwin, IDC_BP_START, NULL);
+    dbgwin->bp_end = field(dbgwin, IDC_BP_END, NULL);
+    dbgwin->bp_cond = field(dbgwin, IDC_BP_COND, NULL);
+    dbgwin->bp_add = button(dbgwin, "Add", IDC_BP_ADD);
+    dbgwin->bp_edit_label = dim_label(dbgwin, "Selected", SS_LEFT);
+    dbgwin->bp_edit = field(dbgwin, IDC_BP_EDIT, L"select a breakpoint, edit its condition (empty for none)");
+    dbgwin->bp_set = button(dbgwin, "Set Condition", IDC_BP_SET);
+    dbgwin->bp_msg = label(dbgwin, "", dbgwin->ui_font, SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->bp_stop = dim_label(dbgwin, "", SS_LEFT | SS_ENDELLIPSIS);
+    on_bp_choice(dbgwin, 0);
+    mem_cues(dbgwin);
 
-    /* Cart */
-    d->cart = mono_view(d, IDC_CART, 1);
+    /* Watches */
+    dbgwin->new_parent = dbgwin->pages[TAB_WATCHES];
+    dbgwin->wt_label = dim_label(dbgwin, "Watch", SS_LEFT);
+    dbgwin->wt_entry = field(dbgwin, IDC_WT_ENTRY, L"an address, label, expression or range (score, 0300-03ff, [$10])");
+    dbgwin->wt_add = button(dbgwin, "Add", IDC_WT_ADD);
+    dbgwin->wt_list = list_box(dbgwin, IDC_WT_LIST);
+    dbgwin->wt_mem = button(dbgwin, "Show in Memory", IDC_WT_MEM);
+    dbgwin->wt_brk = button(dbgwin, "Break on Change", IDC_WT_BRK);
+    dbgwin->wt_remove = button(dbgwin, "Remove", IDC_WT_REMOVE);
 
-    /* FujiNet */
-    d->fuji_title = label(d, "FujiBus packets (SLIP-decoded)");
-    d->fuji_note = child(d, "STATIC", "", SS_LEFT | SS_ENDELLIPSIS, IDC_FUJI_NOTE, d->ui);
-    d->fuji_clear = button(d, "Clear", IDC_FUJI_CLEAR);
-    d->fuji_text = wide_view(d, IDC_FUJI_TEXT);
-    d->state_title = label(d, "The cartridge's link");
-    d->fuji_state = wide_view(d, IDC_FUJI_STATE);
-    d->fuji_count = -1;
+    /* Cart & I/O */
+    dbgwin->new_parent = dbgwin->pages[TAB_CART];
+    dbgwin->cart_text = view(dbgwin, IDC_CART_TEXT, WS_HSCROLL);
+    dbgwin->io_text = view(dbgwin, IDC_IO_TEXT, WS_HSCROLL);
 
-    /* The tab control under every page's controls: with WS_CLIPSIBLINGS it
-     * then never paints its body over a label that has not repainted. */
-    SetWindowPos(d->tabs, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    /* Trace (0, live) and History (1, when stopped) share one ring */
+    for (idx = 0; idx < 2; idx++) {
+        dbgwin->new_parent = dbgwin->pages[TAB_TRACE + idx];
+        dbgwin->h_rec[idx] = child(dbgwin, "BUTTON", "Record", BS_AUTOCHECKBOX | BS_PUSHLIKE | WS_TABSTOP, IDC_H_REC0 + idx, dbgwin->ui_font);
+        dbgwin->h_filter[idx] = combo(dbgwin, IDC_H_FILTER0 + idx);
+        SendMessageA(dbgwin->h_filter[idx], CB_ADDSTRING, 0, (LPARAM)"All instructions");
+        SendMessageA(dbgwin->h_filter[idx], CB_ADDSTRING, 0, (LPARAM)"Branches only");
+        SendMessageA(dbgwin->h_filter[idx], CB_ADDSTRING, 0, (LPARAM)"In range");
+        SendMessageA(dbgwin->h_filter[idx], CB_SETCURSEL, 0, 0);
+        dbgwin->h_range[idx] = field(dbgwin, IDC_H_RANGE0 + idx, L"range, e.g. 8000-80ff");
+        dbgwin->h_clear[idx] = button(dbgwin, "Clear", IDC_H_CLEAR0 + idx);
+        dbgwin->h_note[idx] = dim_label(dbgwin, "", SS_RIGHT | SS_ENDELLIPSIS);
+        dbgwin->h_text[idx] = view(dbgwin, IDC_H_TEXT0 + idx, WS_HSCROLL);
+        dbgwin->h_seen[idx] = (uint64_t)-1;
+    }
+
+    /* Video: the shared controller's tab, one child holding all its controls */
+    dbgwin->new_parent = NULL;
+    dbgwin->video = dbg_video_create(dbgwin->pages[TAB_VIDEO], dbgwin->session, dbgwin->ui_font, dbgwin->mono, dbgwin->dpi);
+
+    /* Sound */
+    dbgwin->new_parent = dbgwin->pages[TAB_SOUND];
+    dbgwin->sound_text = view(dbgwin, IDC_SOUND_TEXT, WS_HSCROLL);
+
+    /* Symbols */
+    dbgwin->new_parent = dbgwin->pages[TAB_SYMBOLS];
+    dbgwin->sym_filter_label = dim_label(dbgwin, "Filter", SS_LEFT);
+    dbgwin->sym_filter = field(dbgwin, IDC_SYM_FILTER, L"part of a name");
+    dbgwin->sym_count = dim_label(dbgwin, "", SS_LEFT);
+    dbgwin->sym_clear = button(dbgwin, "Clear Symbols", IDC_CLEAR_SYMS);
+    dbgwin->sym_break = button(dbgwin, "Break at", IDC_SYM_BREAK);
+    dbgwin->sym_mem = button(dbgwin, "Show in Memory", IDC_SYM_MEM);
+    dbgwin->sym_list = list_box(dbgwin, IDC_SYM_LIST);
+
+    /* FujiNet: the note and the log are UTF-8 (see wide_view_text) */
+    dbgwin->new_parent = dbgwin->pages[TAB_FUJINET];
+    dbgwin->fuji_title = label(dbgwin, "FujiBus packets (SLIP-decoded)", dbgwin->ui_bold, SS_LEFT);
+    dbgwin->fuji_note = dim_label(dbgwin, "", SS_LEFT | SS_ENDELLIPSIS);
+    dbgwin->fuji_clear = button(dbgwin, "Clear", IDC_FUJI_CLEAR);
+    dbgwin->fuji_text = view(dbgwin, IDC_FUJI_TEXT, WS_HSCROLL);
+    dbgwin->fuji_state_title = label(dbgwin, "FujiNet cartridge", dbgwin->ui_bold, SS_LEFT);
+    dbgwin->fuji_state = view(dbgwin, IDC_FUJI_STATE, WS_HSCROLL);
+
+    /* The tab control was made first, so it sits below the pages' containers
+     * already; with WS_CLIPSIBLINGS and the bottom of the z-order a repaint of
+     * it never paints its body over a page. */
+    dbgwin->new_parent = NULL;
+    SetWindowPos(dbgwin->tabs, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
-/* Help's contexts (neshelp.h), one per tab */
-static const char *const k_tab_contexts[] = {
-    "debugger/prompt", "debugger/cpu", "debugger/disassembly", "debugger/ppu",
-    "debugger/apu", "debugger/breakpoints", "debugger/cart", "debugger/fujinet",
+/* Help's contexts (colecohelp.h), one per tab */
+static const char *const k_tab_contexts[TAB_COUNT] = {
+    "debugger/console", "debugger/disassembly", "debugger/memory", "debugger/breakpoints", "debugger/watches",
+    "debugger/cart", "debugger/trace", "debugger/history", "debugger/video", "debugger/sound",
+    "debugger/symbols", "debugger/fujinet",
 };
 
-static void show_page(debugger *d, int page)
+/* On screen: the tab the tab control shows, or one living in a window of its own. */
+static int page_visible(debugger *dbgwin, int page)
 {
-    /* Help, F1 and Ctrl+Shift+H open the tab's section */
-    if (page >= 0 && page < (int)(sizeof k_tab_contexts / sizeof k_tab_contexts[0]))
-        nes_help_set_context(d->hwnd, k_tab_contexts[page], 1);
-    HWND prompt[] = { d->prompt_out, d->prompt_in, d->load_symbols, d->save };
-    HWND cpu[] = { d->cycles, d->ram_label, d->ram_view, d->ram_addr_label, d->ram_addr, d->ram_val_label, d->ram_val };
-    HWND dis[] = { d->follow_pc, d->jump_label, d->jump, d->disasm_hint, d->disasm };
-    HWND ppu[] = { d->ppu_text, d->ppu_view_label, d->ppu_view, d->ppu_pal_label, d->ppu_palette, d->ppu_pic, d->oam };
-    HWND brk[] = { d->bp_list, d->bp_type, d->bp_start_label, d->bp_start, d->bp_end_label, d->bp_end,
-                   d->bp_cond_label, d->bp_cond, d->bp_add, d->bp_remove, d->bp_enable, d->bp_clear };
-    HWND fuji[] = { d->fuji_title, d->fuji_note, d->fuji_clear, d->fuji_text, d->state_title, d->fuji_state };
-    size_t i;
-    d->page = page;
-#define SHOW(arr, p) for (i = 0; i < sizeof(arr) / sizeof((arr)[0]); i++) ShowWindow((arr)[i], page == (p) ? SW_SHOW : SW_HIDE)
-    SHOW(prompt, PAGE_PROMPT);
-    SHOW(cpu, PAGE_CPU);
-    for (i = 0; i < 6; i++) {
-        ShowWindow(d->reg_label[i], page == PAGE_CPU ? SW_SHOW : SW_HIDE);
-        ShowWindow(d->reg_edit[i], page == PAGE_CPU ? SW_SHOW : SW_HIDE);
-        ShowWindow(d->flag[i], page == PAGE_CPU ? SW_SHOW : SW_HIDE);
-    }
-    SHOW(dis, PAGE_DISASM);
-    SHOW(ppu, PAGE_PPU);
-    ShowWindow(d->apu, page == PAGE_APU ? SW_SHOW : SW_HIDE);
-    SHOW(brk, PAGE_BREAKS);
-    ShowWindow(d->cart, page == PAGE_CART ? SW_SHOW : SW_HIDE);
-    SHOW(fuji, PAGE_FUJINET);
-#undef SHOW
+    return dbgwin->popped[page] != NULL || dbgwin->page == page;
 }
 
-static void layout(debugger *d)
+static void show_page(debugger *dbgwin, int page)
+{
+    int ptr;
+    dbgwin->page = page;
+    /* Help, F1 and Ctrl+Shift+H open the tab's section */
+    if (page >= 0 && page < TAB_COUNT) nes_help_set_context(dbgwin->hwnd, k_tab_contexts[page], 1);
+    for (ptr = 0; ptr < TAB_COUNT; ptr++)     /* a tab's controls follow its container */
+        ShowWindow(dbgwin->pages[ptr], dbgwin->popped[ptr] || ptr == page ? SW_SHOW : SW_HIDE);
+    show_bp_list(dbgwin);
+}
+
+/* The tab control's index for a tab, or -1 when it is in a window of its own. */
+static int tab_index(debugger *dbgwin, int page)
+{
+    int idx;
+    for (idx = 0; idx < dbgwin->ntabs; idx++)
+        if (dbgwin->tab_page[idx] == page) return idx;
+    return -1;
+}
+
+static void place(HWND hwnd, int pos_x, int pos_y, int wtext, int hgt);
+static void layout(debugger *dbgwin);
+
+/* Brings a tab to the front: its window if it has one, else the tab control's. */
+static void goto_page(debugger *dbgwin, int page)
+{
+    const int idx = tab_index(dbgwin, page);
+    if (dbgwin->popped[page]) {
+        SetForegroundWindow(dbgwin->popped[page]);
+        return;
+    }
+    if (idx >= 0) {
+        SendMessageA(dbgwin->tabs, TCM_SETCURSEL, (WPARAM)idx, 0);
+        show_page(dbgwin, page);
+        layout(dbgwin);
+        refresh_page(dbgwin, page, 1);
+    }
+}
+
+/* ---- peeling a tab off into a window of its own, and putting it back ----------- */
+
+static void dock_page(debugger *dbgwin, int page)
+{
+    TCITEMA item;
+    char shown[40];
+    HWND pop = dbgwin->popped[page];
+    int pos = 0, ptr, idx;
+
+    if (!pop) return;
+    dbgwin->popped[page] = NULL;
+    SetParent(dbgwin->pages[page], dbgwin->hwnd);
+    for (ptr = 0; ptr < page; ptr++)          /* back where it was in the order */
+        if (!dbgwin->popped[ptr]) pos++;
+    for (idx = dbgwin->ntabs; idx > pos; idx--) dbgwin->tab_page[idx] = dbgwin->tab_page[idx - 1];
+    dbgwin->tab_page[pos] = page;
+    dbgwin->ntabs++;
+    memset(&item, 0, sizeof item);
+    item.mask = TCIF_TEXT;
+    item.pszText = (char *)tab_text(page, shown, sizeof shown);
+    SendMessageA(dbgwin->tabs, TCM_INSERTITEMA, (WPARAM)pos, (LPARAM)&item);
+    DestroyWindow(pop);
+    SendMessageA(dbgwin->tabs, TCM_SETCURSEL, (WPARAM)pos, 0);
+    show_page(dbgwin, page);
+    layout(dbgwin);
+    refresh_page(dbgwin, page, 1);
+}
+
+static void pop_out(debugger *dbgwin, int page)
+{
+    HWND pop;
+    HINSTANCE inst = (HINSTANCE)GetWindowLongPtrA(dbgwin->hwnd, GWLP_HINSTANCE);
+    char title[96];
+    int tab_pos, idx, next;
+
+    if (page < 0 || page >= TAB_COUNT || dbgwin->popped[page] || dbgwin->ntabs <= 1) return;   /* one tab always stays */
+    tab_pos = tab_index(dbgwin, page);
+    if (tab_pos < 0) return;
+    SendMessageA(dbgwin->tabs, TCM_DELETEITEM, (WPARAM)tab_pos, 0);
+    for (idx = tab_pos; idx < dbgwin->ntabs - 1; idx++) dbgwin->tab_page[idx] = dbgwin->tab_page[idx + 1];
+    dbgwin->ntabs--;
+
+    snprintf(title, sizeof title, "NES Debugger - %s", k_tabs[page].label);
+    pop = CreateWindowExA(0, POP_CLASS, title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                          scaled(dbgwin, 900), scaled(dbgwin, 620), dbgwin->hwnd, NULL, inst, NULL);
+    SetWindowLongPtrA(pop, GWLP_USERDATA, page);
+    nes_help_set_context(pop, k_tab_contexts[page], 1);       /* F1 in the window opens its tab's section */
+    {
+        HWND dock = CreateWindowExA(0, "BUTTON", "Dock", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, scaled(dbgwin, 4),
+                                    scaled(dbgwin, 4), scaled(dbgwin, 70), scaled(dbgwin, 26), pop, (HMENU)(INT_PTR)IDC_DOCK, inst, NULL);
+        SendMessageA(dock, WM_SETFONT, (WPARAM)dbgwin->ui_font, TRUE);
+    }
+    SetParent(dbgwin->pages[page], pop);
+    dbgwin->popped[page] = pop;
+    if (page == dbgwin->page) {              /* the tab in front left: the one after it comes forward */
+        next = tab_pos < dbgwin->ntabs ? tab_pos : dbgwin->ntabs - 1;
+        SendMessageA(dbgwin->tabs, TCM_SETCURSEL, (WPARAM)next, 0);
+        show_page(dbgwin, dbgwin->tab_page[next]);
+    } else {                            /* another tab left: the one in front stays */
+        SendMessageA(dbgwin->tabs, TCM_SETCURSEL, (WPARAM)tab_index(dbgwin, dbgwin->page), 0);
+        show_page(dbgwin, dbgwin->page);
+    }
+    layout(dbgwin);
+    ShowWindow(pop, SW_SHOW);
+    refresh_page(dbgwin, page, 1);
+    refresh_page(dbgwin, dbgwin->page, 1);
+}
+
+/* A tab's container: its controls' notifications go to the debugger window,
+ * whichever window the container is in. */
+static LRESULT CALLBACK page_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    HWND main = (HWND)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_COMMAND:
+    case WM_NOTIFY:
+    case WM_DRAWITEM:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        if (main) return SendMessageA(main, msg, wparam, lparam);
+        break;
+    default: break;
+    }
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* The window a peeled-off tab lives in. */
+static LRESULT CALLBACK pop_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    const int page = (int)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_SIZE:
+        if (g_dbg) layout(g_dbg);
+        return 0;
+    case WM_COMMAND:
+        if (g_dbg && LOWORD(wparam) == IDC_DOCK) dock_page(g_dbg, page);
+        return 0;
+    case WM_CLOSE:
+        if (g_dbg) dock_page(g_dbg, page);
+        else DestroyWindow(hwnd);
+        return 0;
+    case WM_GETMINMAXINFO:
+        ((MINMAXINFO *)lparam)->ptMinTrackSize.x = MulDiv(420, g_dbg && g_dbg->dpi ? g_dbg->dpi : 96, 96);
+        ((MINMAXINFO *)lparam)->ptMinTrackSize.y = MulDiv(300, g_dbg && g_dbg->dpi ? g_dbg->dpi : 96, 96);
+        return 0;
+    default: break;
+    }
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* ---- layout ----------------------------------------------------------------------- */
+
+static void place(HWND hwnd, int pos_x, int pos_y, int wtext, int hgt)
+{
+    MoveWindow(hwnd, pos_x, pos_y, wtext > 1 ? wtext : 1, hgt > 1 ? hgt : 1, TRUE);
+}
+
+/* The controls of each tab inside its container. */
+static void layout_pages(debugger *dbgwin)
+{
+    const int button_h = scaled(dbgwin, 26), edit_h = scaled(dbgwin, 24), label_h = scaled(dbgwin, 18), gap = scaled(dbgwin, 6);
+    RECT row;
+    int ptr, wtext, hwnd, pos_x, pos_y, idx, button_w;
+
+    for (ptr = 0; ptr < TAB_COUNT; ptr++) {
+        if (!dbgwin->pages[ptr]) continue;
+        GetClientRect(dbgwin->pages[ptr], &row);
+        wtext = row.right;
+        hwnd = row.bottom;
+        if (wtext < 40 || hwnd < 40) continue;
+        switch (ptr) {
+        case TAB_CONSOLE:
+            button_w = dbgwin->mono_w + scaled(dbgwin, 6);
+            place(dbgwin->con_out, 0, 0, wtext, hwnd - edit_h - scaled(dbgwin, 8));
+            place(dbgwin->con_prompt, 0, hwnd - edit_h + (edit_h - dbgwin->mono_h) / 2, button_w, dbgwin->mono_h);
+            place(dbgwin->con_in, button_w + scaled(dbgwin, 2), hwnd - edit_h, wtext - button_w - scaled(dbgwin, 2), edit_h);
+            break;
+        case TAB_DISASM:
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Follow PC") + scaled(dbgwin, 24);
+            place(dbgwin->follow_pc, 0, scaled(dbgwin, 1), button_w, scaled(dbgwin, 22));
+            pos_x = button_w + scaled(dbgwin, 12);
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Jump to") + scaled(dbgwin, 6);
+            place(dbgwin->jump_label, pos_x, (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->jump, pos_x, 0, scaled(dbgwin, 150), edit_h);
+            pos_x += scaled(dbgwin, 162);
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Break at") + scaled(dbgwin, 6);
+            place(dbgwin->break_label, pos_x, (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->break_at, pos_x, 0, scaled(dbgwin, 120), edit_h);
+            pos_x += scaled(dbgwin, 132);
+            place(dbgwin->disasm_hint, pos_x, (edit_h - label_h) / 2, wtext - pos_x, label_h);
+            place(dbgwin->disasm, 0, edit_h + scaled(dbgwin, 6), wtext, hwnd - edit_h - scaled(dbgwin, 6));
+            break;
+        case TAB_MEMORY:
+            pos_x = 0;
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Space") + scaled(dbgwin, 6);
+            place(dbgwin->space_label, pos_x, (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->mem_space, pos_x, 0, scaled(dbgwin, 90), scaled(dbgwin, 240));
+            pos_x += scaled(dbgwin, 102);
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Go to") + scaled(dbgwin, 6);
+            place(dbgwin->goto_label, pos_x, (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->mem_goto, pos_x, 0, scaled(dbgwin, 170), edit_h);
+            pos_x += scaled(dbgwin, 176);
+            button_w = btn_w(dbgwin, "Back 4K");
+            place(dbgwin->mem_back, pos_x, -scaled(dbgwin, 1), button_w, button_h);
+            pos_x += button_w + scaled(dbgwin, 4);
+            button_w = btn_w(dbgwin, "On 4K");
+            place(dbgwin->mem_on, pos_x, -scaled(dbgwin, 1), button_w, button_h);
+            pos_x += button_w + scaled(dbgwin, 24);
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Poke") + scaled(dbgwin, 6);
+            place(dbgwin->write_label, pos_x, (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->mem_write, pos_x, 0, wtext - pos_x > scaled(dbgwin, 120) ? (wtext - pos_x < scaled(dbgwin, 300) ? wtext - pos_x : scaled(dbgwin, 300)) : scaled(dbgwin, 120), edit_h);
+            pos_y = button_h + gap;
+            pos_x = 0;
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Search") + scaled(dbgwin, 6);
+            place(dbgwin->srch_label, pos_x, pos_y + (edit_h - label_h) / 2, button_w, label_h);
+            pos_x += button_w;
+            place(dbgwin->srch_kind, pos_x, pos_y, scaled(dbgwin, 110), scaled(dbgwin, 200));
+            pos_x += scaled(dbgwin, 116);
+            place(dbgwin->srch_entry, pos_x, pos_y, scaled(dbgwin, 230), edit_h);
+            pos_x += scaled(dbgwin, 236);
+            button_w = btn_w(dbgwin, "Find Next");
+            place(dbgwin->srch_next, pos_x, pos_y - scaled(dbgwin, 1), button_w, button_h);
+            pos_x += button_w + scaled(dbgwin, 4);
+            button_w = btn_w(dbgwin, "Find Previous");
+            place(dbgwin->srch_prev, pos_x, pos_y - scaled(dbgwin, 1), button_w, button_h);
+            pos_x += button_w + scaled(dbgwin, 12);
+            place(dbgwin->srch_note, pos_x, pos_y + (edit_h - label_h) / 2, wtext - pos_x, label_h);
+            pos_y += button_h + gap;
+            place(dbgwin->mem_view, 0, pos_y, wtext, hwnd - pos_y);
+            break;
+        case TAB_BREAKS: {
+            const int stop_y = hwnd - label_h, msg_y = stop_y - label_h - scaled(dbgwin, 2), add_y = msg_y - scaled(dbgwin, 8) - edit_h;
+            const int edit_y = add_y - gap - edit_h;
+            const int list_y = button_h + gap;
+            int clear_w = btn_w(dbgwin, "Clear All"), help_w = btn_w(dbgwin, "Clear Hits"), right_w = btn_w(dbgwin, "Remove");
+            place(dbgwin->bp_clear, wtext - clear_w, 0, clear_w, button_h);
+            place(dbgwin->bp_hits, wtext - clear_w - gap - help_w, 0, help_w, button_h);
+            place(dbgwin->bp_remove, wtext - clear_w - help_w - 2 * gap - right_w, 0, right_w, button_h);
+            place(dbgwin->bp_hint, 0, (button_h - label_h) / 2, wtext - clear_w - help_w - right_w - 4 * gap, label_h);
+            place(dbgwin->bp_list, 0, list_y, wtext, edit_y - gap - list_y);
+            place(dbgwin->bp_empty, 0, list_y + scaled(dbgwin, 12), wtext, label_h);
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Selected") + scaled(dbgwin, 6);
+            idx = btn_w(dbgwin, "Set Condition");
+            place(dbgwin->bp_edit_label, 0, edit_y + (edit_h - label_h) / 2, button_w, label_h);
+            place(dbgwin->bp_edit, button_w, edit_y, wtext - button_w - idx - gap, edit_h);
+            place(dbgwin->bp_set, wtext - idx, edit_y - scaled(dbgwin, 1), idx, button_h);
+            pos_x = 0;
+            place(dbgwin->bp_type, pos_x, add_y, scaled(dbgwin, 90), scaled(dbgwin, 240));
+            pos_x += scaled(dbgwin, 96);
+            place(dbgwin->bp_space, pos_x, add_y, scaled(dbgwin, 84), scaled(dbgwin, 240));
+            pos_x += scaled(dbgwin, 90);
+            place(dbgwin->bp_start, pos_x, add_y, scaled(dbgwin, 140), edit_h);
+            pos_x += scaled(dbgwin, 146);
+            place(dbgwin->bp_end, pos_x, add_y, scaled(dbgwin, 90), edit_h);
+            pos_x += scaled(dbgwin, 96);
+            button_w = btn_w(dbgwin, "Add");
+            place(dbgwin->bp_cond, pos_x, add_y, wtext - pos_x - button_w - gap, edit_h);
+            place(dbgwin->bp_add, wtext - button_w, add_y - scaled(dbgwin, 1), button_w, button_h);
+            place(dbgwin->bp_msg, 0, msg_y, wtext, label_h);
+            place(dbgwin->bp_stop, 0, stop_y, wtext, label_h);
+            break;
+        }
+        case TAB_WATCHES: {
+            const int bottom = hwnd - button_h;
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Watch") + scaled(dbgwin, 6);
+            place(dbgwin->wt_label, 0, (edit_h - label_h) / 2, button_w, label_h);
+            idx = btn_w(dbgwin, "Add");
+            place(dbgwin->wt_entry, button_w, 0, wtext - button_w - idx - gap, edit_h);
+            place(dbgwin->wt_add, wtext - idx, -scaled(dbgwin, 1), idx, button_h);
+            place(dbgwin->wt_list, 0, button_h + gap, wtext, bottom - button_h - 2 * gap);
+            pos_x = 0;
+            button_w = btn_w(dbgwin, "Show in Memory");
+            place(dbgwin->wt_mem, pos_x, bottom, button_w, button_h);
+            pos_x += button_w + gap;
+            button_w = btn_w(dbgwin, "Break on Change");
+            place(dbgwin->wt_brk, pos_x, bottom, button_w, button_h);
+            pos_x += button_w + gap;
+            button_w = btn_w(dbgwin, "Remove");
+            place(dbgwin->wt_remove, pos_x, bottom, button_w, button_h);
+            break;
+        }
+        case TAB_CART: {
+            const int left = (wtext - gap) * 9 / 20;
+            place(dbgwin->cart_text, 0, 0, left, hwnd);
+            place(dbgwin->io_text, left + gap, 0, wtext - left - gap, hwnd);
+            break;
+        }
+        case TAB_TRACE:
+        case TAB_HISTORY:
+            idx = ptr - TAB_TRACE;
+            pos_x = 0;
+            button_w = btn_w(dbgwin, "Record");
+            place(dbgwin->h_rec[idx], pos_x, 0, button_w, button_h);
+            pos_x += button_w + gap;
+            place(dbgwin->h_filter[idx], pos_x, 1, scaled(dbgwin, 150), scaled(dbgwin, 200));
+            pos_x += scaled(dbgwin, 156);
+            place(dbgwin->h_range[idx], pos_x, 1, scaled(dbgwin, 190), edit_h);
+            pos_x += scaled(dbgwin, 196);
+            button_w = btn_w(dbgwin, "Clear");
+            place(dbgwin->h_clear[idx], pos_x, 0, button_w, button_h);
+            pos_x += button_w + gap;
+            place(dbgwin->h_note[idx], pos_x, (button_h - label_h) / 2, wtext - pos_x, label_h);
+            place(dbgwin->h_text[idx], 0, button_h + gap, wtext, hwnd - button_h - gap);
+            break;
+        case TAB_VIDEO:
+            if (dbgwin->video) dbg_video_place(dbgwin->video, 0, 0, wtext, hwnd);
+            break;
+        case TAB_SOUND:
+            place(dbgwin->sound_text, 0, 0, wtext, hwnd);
+            break;
+        case TAB_SYMBOLS:
+            button_w = text_w(dbgwin, dbgwin->ui_font, "Filter") + scaled(dbgwin, 6);
+            place(dbgwin->sym_filter_label, 0, (edit_h - label_h) / 2, button_w, label_h);
+            place(dbgwin->sym_filter, button_w, 0, scaled(dbgwin, 240), edit_h);
+            place(dbgwin->sym_count, button_w + scaled(dbgwin, 250), (edit_h - label_h) / 2, scaled(dbgwin, 160), label_h);
+            idx = btn_w(dbgwin, "Clear Symbols");
+            place(dbgwin->sym_clear, wtext - idx, -scaled(dbgwin, 1), idx, button_h);
+            button_w = btn_w(dbgwin, "Show in Memory");
+            place(dbgwin->sym_mem, wtext - idx - gap - button_w, -scaled(dbgwin, 1), button_w, button_h);
+            idx = btn_w(dbgwin, "Break at");
+            place(dbgwin->sym_break, wtext - btn_w(dbgwin, "Clear Symbols") - 2 * gap - button_w - idx, -scaled(dbgwin, 1), idx, button_h);
+            place(dbgwin->sym_list, 0, button_h + gap, wtext, hwnd - button_h - gap);
+            break;
+        case TAB_FUJINET: {
+            /* the packets left (a note and Clear over them), the cartridge's link and counts right */
+            const int right_w = wtext / 3 > scaled(dbgwin, 340) ? scaled(dbgwin, 340) : wtext / 3 > scaled(dbgwin, 220) ? wtext / 3 : scaled(dbgwin, 220);
+            const int left_w = wtext - right_w - scaled(dbgwin, 12);
+            const int clear_w = btn_w(dbgwin, "Clear");
+            place(dbgwin->fuji_title, 0, 0, left_w, label_h);
+            place(dbgwin->fuji_clear, left_w - clear_w, label_h + scaled(dbgwin, 4), clear_w, button_h);
+            place(dbgwin->fuji_note, 0, label_h + scaled(dbgwin, 4) + (button_h - label_h) / 2, left_w - clear_w - gap, label_h);
+            place(dbgwin->fuji_text, 0, label_h + button_h + scaled(dbgwin, 10), left_w, hwnd - label_h - button_h - scaled(dbgwin, 10));
+            place(dbgwin->fuji_state_title, left_w + scaled(dbgwin, 12), 0, right_w, label_h);
+            place(dbgwin->fuji_state, left_w + scaled(dbgwin, 12), label_h + scaled(dbgwin, 4), right_w, hwnd - label_h - scaled(dbgwin, 4));
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
+/* The register strip's height: three rows. */
+static int strip_height(const debugger *dbgwin)
+{
+    return 3 * (scaled(dbgwin, 24) + scaled(dbgwin, 5)) + scaled(dbgwin, 6);
+}
+
+static void layout(debugger *dbgwin)
 {
     RECT client, page;
-    int y = 8, bx = 8, px, py, pw, ph, i;
+    int pos_x, pos_y, wtext, idx, page_x, page_y, page_w, page_h, strip_y, tab_y;
+    const int button_h = scaled(dbgwin, 26), edit_h = scaled(dbgwin, 24), label_h = scaled(dbgwin, 18), gap = scaled(dbgwin, 6);
 
-    GetClientRect(d->hwnd, &client);
+    if (!dbgwin->tabs) return;
+    GetClientRect(dbgwin->hwnd, &client);
 
-    MoveWindow(d->run_btn, bx, y, 96, 26, TRUE);     bx += 102;
-    MoveWindow(d->step_btn, bx, y, 90, 26, TRUE);    bx += 96;
-    MoveWindow(d->over_btn, bx, y, 90, 26, TRUE);    bx += 96;
-    MoveWindow(d->out_btn, bx, y, 110, 26, TRUE);    bx += 116;
-    MoveWindow(d->scan_btn, bx, y, 90, 26, TRUE);    bx += 96;
-    MoveWindow(d->frame_btn, bx, y, 80, 26, TRUE);   bx += 86;
-    MoveWindow(d->help_btn, client.right - 8 - 72, y, 72, 26, TRUE);
-    MoveWindow(d->status, bx, y + 5, client.right - bx - 88 > 40 ? client.right - bx - 88 : 40, 20, TRUE);
-
-    MoveWindow(d->tabs, 8, 40, client.right - 16, client.bottom - 48, TRUE);
-    page = (RECT){ 8, 40, client.right - 8, client.bottom - 8 };
-    SendMessageA(d->tabs, TCM_ADJUSTRECT, FALSE, (LPARAM)&page);
-    px = page.left + 4; py = page.top + 4;
-    pw = page.right - page.left - 8; ph = page.bottom - page.top - 8;
-    if (pw < 200) pw = 200;
-    if (ph < 200) ph = 200;
-
-    /* Prompt */
-    MoveWindow(d->prompt_out, px, py, pw, ph - 32, TRUE);
-    MoveWindow(d->prompt_in, px, py + ph - 26, pw - 236, 24, TRUE);
-    MoveWindow(d->load_symbols, px + pw - 228, py + ph - 27, 120, 26, TRUE);
-    MoveWindow(d->save, px + pw - 102, py + ph - 27, 102, 26, TRUE);
-
-    /* CPU & RAM */
+    /* The toolbar: stepping, then symbols, save and pop out, the status after
+     * them. Too narrow for the status beside them, it goes on a line of its own. */
     {
-        int x = px, ry = py;
-        for (i = 0; i < 6; i++) {
-            MoveWindow(d->reg_label[i], x, ry + 4, 24, 18, TRUE); x += 26;
-            MoveWindow(d->reg_edit[i], x, ry, 62, 24, TRUE); x += 74;
+        HWND bar[10] = { dbgwin->run_btn, dbgwin->step_btn, dbgwin->over_btn, dbgwin->out_btn, dbgwin->run_to_btn, dbgwin->scan_btn,
+                         dbgwin->frame_btn, dbgwin->sym_btn, dbgwin->save_btn, dbgwin->popout_btn };
+        const char *btext[10] = { "Stop (F5)", "Step (F7)", "Step Over (F8)", "Step Out (Shift+F8)",
+                                  "Run to Cursor", "Scanline", "Frame (Shift+F7)", "Symbols...", "Save...", "Pop Out" };
+        const int help_w = btn_w(dbgwin, "Help");
+        const int sright = client.right - help_w - gap;
+        pos_x = scaled(dbgwin, 8);
+        for (idx = 0; idx < 10; idx++) {
+            wtext = btn_w(dbgwin, btext[idx]);
+            place(bar[idx], pos_x, scaled(dbgwin, 8), wtext, button_h);
+            pos_x += wtext + gap + (idx == 6 ? scaled(dbgwin, 14) : 0);
         }
-        ry += 32;
-        x = px;
-        for (i = 0; i < 6; i++) { MoveWindow(d->flag[i], x, ry, 40, 22, TRUE); x += 44; }
-        MoveWindow(d->cycles, x + 8, ry + 3, pw - (x - px) - 8, 18, TRUE);
-        ry += 30;
-        MoveWindow(d->ram_label, px, ry, pw, 18, TRUE); ry += 20;
-        MoveWindow(d->ram_view, px, ry, pw, ph - (ry - py) - 34, TRUE);
-        ry = py + ph - 26;
-        MoveWindow(d->ram_addr_label, px, ry + 4, 90, 18, TRUE);
-        MoveWindow(d->ram_addr, px + 94, ry, 80, 24, TRUE);
-        MoveWindow(d->ram_val_label, px + 184, ry + 4, 40, 18, TRUE);
-        MoveWindow(d->ram_val, px + 226, ry, 60, 24, TRUE);
+        pos_y = scaled(dbgwin, 8) + button_h + scaled(dbgwin, 8);
+        place(dbgwin->help_btn, client.right - scaled(dbgwin, 8) - help_w, scaled(dbgwin, 8), help_w, button_h);
+        if (sright - scaled(dbgwin, 8) - pos_x >= scaled(dbgwin, 220)) {
+            place(dbgwin->status, pos_x, scaled(dbgwin, 8) + (button_h - label_h) / 2, sright - scaled(dbgwin, 2) - pos_x, label_h);
+        } else {
+            place(dbgwin->status, scaled(dbgwin, 8), pos_y - scaled(dbgwin, 2), client.right - scaled(dbgwin, 16), label_h);
+            pos_y += label_h + scaled(dbgwin, 4);
+        }
+        tab_y = pos_y;
     }
 
-    /* Disassembly */
-    MoveWindow(d->follow_pc, px, py + 2, 90, 22, TRUE);
-    MoveWindow(d->jump_label, px + 96, py + 4, 50, 18, TRUE);
-    MoveWindow(d->jump, px + 148, py, 150, 24, TRUE);
-    MoveWindow(d->disasm_hint, px + 308, py + 4, pw - 308 > 40 ? pw - 308 : 40, 18, TRUE);
-    MoveWindow(d->disasm, px, py + 30, pw, ph - 30, TRUE);
-
-    /* PPU: registers and OAM left, the picture right */
+    /* The register strip, under every tab: PC SP A X Y P and where the beam is /
+     * the flags and the CPU's lines / a hint. */
+    strip_y = client.bottom - strip_height(dbgwin);
     {
-        int lw = pw * 42 / 100, rx = px + lw + 10, rw = pw - lw - 10;
-        int th = ph * 45 / 100;
-        MoveWindow(d->ppu_text, px, py, lw, th, TRUE);
-        MoveWindow(d->oam, px, py + th + 6, lw, ph - th - 6, TRUE);
-        MoveWindow(d->ppu_view_label, rx, py + 4, 40, 18, TRUE);
-        MoveWindow(d->ppu_view, rx + 42, py, 120, 200, TRUE);
-        MoveWindow(d->ppu_pal_label, rx + 172, py + 4, 46, 18, TRUE);
-        MoveWindow(d->ppu_palette, rx + 220, py, 100, 200, TRUE);
-        MoveWindow(d->ppu_pic, rx, py + 30, rw, ph - 30, TRUE);
+        const int right_w = dbgwin->mono_w * 5 + scaled(dbgwin, 8), cell = right_w + text_w(dbgwin, dbgwin->ui_font, "WWW") + scaled(dbgwin, 22);
+        const int left_w = text_w(dbgwin, dbgwin->ui_font, "WWW") + scaled(dbgwin, 2);
+        const int row_h = edit_h + scaled(dbgwin, 5);
+        page_x = scaled(dbgwin, 12);
+        for (idx = 0; idx < NREGS; idx++) {
+            const int row_top = strip_y + scaled(dbgwin, 3);
+            place(dbgwin->reg_label[idx], page_x + idx * cell, row_top + (edit_h - label_h) / 2, left_w, label_h);
+            place(dbgwin->reg[idx], page_x + idx * cell + left_w + scaled(dbgwin, 4), row_top, right_w, edit_h);
+        }
+        pos_x = page_x + NREGS * cell + scaled(dbgwin, 16);
+        place(dbgwin->beam_label, pos_x, strip_y + scaled(dbgwin, 3) + (edit_h - label_h) / 2, client.right - pos_x - page_x, label_h);
+        pos_x = page_x;
+        pos_y = strip_y + scaled(dbgwin, 3) + row_h;
+        for (idx = 0; idx < NCHECKS; idx++) {
+            wtext = text_w(dbgwin, dbgwin->ui_font, k_chk_names[idx]) + scaled(dbgwin, 28);
+            place(dbgwin->chk[idx], pos_x, pos_y + scaled(dbgwin, 1), wtext, scaled(dbgwin, 22));
+            pos_x += wtext + scaled(dbgwin, 6);
+        }
+        place(dbgwin->irq_label, pos_x + scaled(dbgwin, 16), pos_y + (edit_h - label_h) / 2, scaled(dbgwin, 260), label_h);
+        place(dbgwin->cpu_hint, page_x, strip_y + scaled(dbgwin, 3) + 2 * row_h + (edit_h - label_h) / 2, client.right - 2 * page_x, label_h);
     }
 
-    /* APU & Input */
-    MoveWindow(d->apu, px, py, pw, ph, TRUE);
+    /* The tab control is the strip alone: the pages sit on the window's own
+     * background, which their captions are drawn on. */
+    SetRect(&page, 0, 0, scaled(dbgwin, 400), scaled(dbgwin, 400));
+    SendMessageA(dbgwin->tabs, TCM_ADJUSTRECT, FALSE, (LPARAM)&page);
+    place(dbgwin->tabs, scaled(dbgwin, 8), tab_y, client.right - scaled(dbgwin, 16), page.top);
+    page_x = scaled(dbgwin, 12);
+    page_y = tab_y + page.top + scaled(dbgwin, 6);
+    page_w = client.right - 2 * page_x;
+    page_h = strip_y - scaled(dbgwin, 6) - page_y;
+    if (page_w < scaled(dbgwin, 300)) page_w = scaled(dbgwin, 300);
+    if (page_h < scaled(dbgwin, 160)) page_h = scaled(dbgwin, 160);
 
-    /* Breakpoints */
-    {
-        int ry = py + ph - 62;
-        MoveWindow(d->bp_list, px, py, pw, ry - py - 6, TRUE);
-        MoveWindow(d->bp_type, px, ry, 100, 200, TRUE);
-        MoveWindow(d->bp_start_label, px + 108, ry + 4, 50, 18, TRUE);
-        MoveWindow(d->bp_start, px + 160, ry, 90, 24, TRUE);
-        MoveWindow(d->bp_end_label, px + 256, ry + 4, 18, 18, TRUE);
-        MoveWindow(d->bp_end, px + 276, ry, 90, 24, TRUE);
-        MoveWindow(d->bp_cond_label, px + 374, ry + 4, 14, 18, TRUE);
-        MoveWindow(d->bp_cond, px + 390, ry, pw - 390 - 70 > 80 ? pw - 390 - 70 : 80, 24, TRUE);
-        MoveWindow(d->bp_add, px + pw - 64, ry - 1, 64, 26, TRUE);
-        ry += 32;
-        MoveWindow(d->bp_remove, px, ry, 90, 26, TRUE);
-        MoveWindow(d->bp_enable, px + 96, ry, 120, 26, TRUE);
-        MoveWindow(d->bp_clear, px + 222, ry, 90, 26, TRUE);
+    /* each tab's container: in the tab control's page, or filling the window it was peeled off into */
+    for (idx = 0; idx < TAB_COUNT; idx++) {
+        if (dbgwin->popped[idx]) {
+            RECT pop_rect;
+            GetClientRect(dbgwin->popped[idx], &pop_rect);
+            MoveWindow(dbgwin->pages[idx], scaled(dbgwin, 6), scaled(dbgwin, 34), pop_rect.right > scaled(dbgwin, 12) ? pop_rect.right - scaled(dbgwin, 12) : 1,
+                       pop_rect.bottom > scaled(dbgwin, 40) ? pop_rect.bottom - scaled(dbgwin, 40) : 1, TRUE);
+        } else {
+            MoveWindow(dbgwin->pages[idx], page_x, page_y, page_w, page_h, TRUE);
+        }
     }
+    layout_pages(dbgwin);
 
-    /* Cart */
-    MoveWindow(d->cart, px, py, pw, ph, TRUE);
-
-    /* FujiNet: the packets left (a note and Clear over them), the link right */
-    {
-        const int rw = pw / 3 > 320 ? 320 : pw / 3 > 220 ? pw / 3 : 220;
-        const int lw = pw - rw - 12;
-        MoveWindow(d->fuji_title, px, py + 2, lw, 18, TRUE);
-        MoveWindow(d->fuji_note, px, py + 28, lw - 80, 18, TRUE);
-        MoveWindow(d->fuji_clear, px + lw - 72, py + 24, 72, 26, TRUE);
-        MoveWindow(d->fuji_text, px, py + 56, lw, ph - 56, TRUE);
-        MoveWindow(d->state_title, px + lw + 12, py + 2, rw, 18, TRUE);
-        MoveWindow(d->fuji_state, px + lw + 12, py + 24, rw, ph - 24, TRUE);
-    }
+    /* everything again: what the controls left behind where they were */
+    RedrawWindow(dbgwin->hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
-/* ---- attach / detach -------------------------------------------------------------- */
+/* ---- the window ------------------------------------------------------------------- */
 
-static void attach(debugger *d)
+static void hide_window(debugger *dbgwin)
 {
-    nesdebug_attach(d->dbg);
-    d->seen_gen = nesdebug_generation(d->dbg);
-    d->was_stopped = 1;
-    refresh_all(d);
-    SetTimer(d->hwnd, TIMER_REFRESH, 100, NULL);
+    KillTimer(dbgwin->hwnd, TIMER_REFRESH);
+    nesdebug_trace_enable(dbgwin->dbg, 0);        /* the ring costs the CPU its slow path: only while a window wants it */
+    nesdebug_history_enable(dbgwin->dbg, 0);
+    nesdebug_detach(dbgwin->dbg);                 /* clears the engine away and lets the machine run on */
+    ShowWindow(dbgwin->hwnd, SW_HIDE);
 }
 
-static void detach_and_hide(debugger *d)
+/* Showing the window: the engine attaches, the timer polls again and every tab is brought up to date. */
+static void start_and_refresh(debugger *dbgwin)
 {
-    KillTimer(d->hwnd, TIMER_REFRESH);
-    nesdebug_detach(d->dbg);
-    ShowWindow(d->hwnd, SW_HIDE);
+    nesdebug_attach(dbgwin->dbg);                 /* stops the machine, as on every sibling */
+    dbgwin->was_stopped = 0;
+    dbgwin->seen_gen = nesdebug_generation(dbgwin->dbg);
+    SetTimer(dbgwin->hwnd, TIMER_REFRESH, 100, NULL);
+    settle_and_sync(dbgwin, 1);
 }
 
-/* ---- window proc -------------------------------------------------------------------- */
-
-static void draw_run_button(debugger *d, const DRAWITEMSTRUCT *di)
+static void draw_run_button(debugger *dbgwin, const DRAWITEMSTRUCT *di)
 {
     char text[32];
-    const int stopped = nesdebug_is_stopped(d->dbg);
-    RECT r = di->rcItem;
+    const int stopped = nesdebug_is_stopped(dbgwin->dbg);
+    RECT row = di->rcItem;
     if (stopped) {
-        FillRect(di->hDC, &r, d->accent);
-        FrameRect(di->hDC, &r, (HBRUSH)GetStockObject(GRAY_BRUSH));
-        SetTextColor(di->hDC, RGB(255, 255, 255));
+        const int contrast = high_contrast();
+        FillRect(di->hDC, &row, contrast ? GetSysColorBrush(COLOR_HIGHLIGHT) : dbgwin->accent);
+        FrameRect(di->hDC, &row, (HBRUSH)GetStockObject(GRAY_BRUSH));
+        SetTextColor(di->hDC, contrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : INK_RGB);
     } else {
-        DrawFrameControl(di->hDC, &r, DFC_BUTTON, DFCS_BUTTONPUSH | ((di->itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
+        DrawFrameControl(di->hDC, &row, DFC_BUTTON, DFCS_BUTTONPUSH | ((di->itemState & ODS_SELECTED) ? DFCS_PUSHED : 0));
         SetTextColor(di->hDC, GetSysColor(COLOR_BTNTEXT));
     }
     SetBkMode(di->hDC, TRANSPARENT);
     GetWindowTextA(di->hwndItem, text, sizeof text);
-    DrawTextA(di->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(di->hDC, dbgwin->ui_font);
+    DrawTextA(di->hDC, text, -1, &row, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     if (di->itemState & ODS_FOCUS) {
-        InflateRect(&r, -3, -3);
-        DrawFocusRect(di->hDC, &r);
+        InflateRect(&row, -3, -3);
+        DrawFocusRect(di->hDC, &row);
     }
 }
 
-static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+
+static void select_tab(debugger *dbgwin, int page)
 {
-    debugger *d = g_dbg;
-    if (!d || d->hwnd != hwnd) return DefWindowProcA(hwnd, msg, wp, lp);
+    goto_page(dbgwin, page);
+}
+
+static LRESULT on_notify(debugger *dbgwin, NMHDR *nmhdr)
+{
+    if (nmhdr->hwndFrom == dbgwin->tabs && nmhdr->code == (UINT)TCN_SELCHANGE) {
+        const int idx = (int)SendMessageA(dbgwin->tabs, TCM_GETCURSEL, 0, 0);
+        if (idx >= 0 && idx < dbgwin->ntabs) {
+            show_page(dbgwin, dbgwin->tab_page[idx]);
+            refresh_page(dbgwin, dbgwin->tab_page[idx], 1);
+        }
+        return 0;
+    }
+    if (nmhdr->code == (UINT)NM_CUSTOMDRAW && (nmhdr->hwndFrom == dbgwin->h_rec[0] || nmhdr->hwndFrom == dbgwin->h_rec[1]))
+        return nes_accent_customdraw((const NMCUSTOMDRAW *)nmhdr, SendMessageA(nmhdr->hwndFrom, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (nmhdr->hwndFrom != dbgwin->bp_list) return 0;
+    if (nmhdr->code == (UINT)LVN_ITEMCHANGED) {
+        const NMLISTVIEW *notify = (const NMLISTVIEW *)nmhdr;
+        /* a row picked: its condition is up for editing */
+        if (!dbgwin->updating && notify->iItem >= 0 && notify->iItem < dbgwin->nbps && (notify->uChanged & LVIF_STATE) &&
+            (notify->uNewState & LVIS_SELECTED) && !(notify->uOldState & LVIS_SELECTED))
+            SetWindowTextA(dbgwin->bp_edit, dbgwin->bps[notify->iItem].condition);
+        /* a row's box: its breakpoint on or off (the list follows after) */
+        if (!dbgwin->updating && notify->iItem >= 0 && notify->iItem < dbgwin->nbps && (notify->uChanged & LVIF_STATE) &&
+            ((notify->uNewState ^ notify->uOldState) & LVIS_STATEIMAGEMASK) && (notify->uOldState & LVIS_STATEIMAGEMASK)) {
+            const int on = ((notify->uNewState & LVIS_STATEIMAGEMASK) >> 12) == 2;
+            if (on != (dbgwin->bps[notify->iItem].enabled != 0)) {
+                nesdebug_breakpoint_enable(dbgwin->dbg, dbgwin->bps[notify->iItem].id, on);
+                PostMessageA(dbgwin->hwnd, WM_DBG_SYNC, 0, 0);
+            }
+        }
+    } else if (nmhdr->code == (UINT)LVN_KEYDOWN) {
+        /* after the list's own handling: removing rebuilds it */
+        if (((const NMLVKEYDOWN *)nmhdr)->wVKey == VK_DELETE)
+            PostMessageA(dbgwin->hwnd, WM_COMMAND, MAKEWPARAM(IDC_BP_REMOVE, BN_CLICKED), 0);
+    } else if (nmhdr->code == (UINT)NM_DBLCLK) {
+        /* a CPU breakpoint's row opens the disassembly there */
+        const int idx = bp_selected(dbgwin);
+        if (idx >= 0 && dbgwin->bps[idx].space == NESDEBUG_SPACE_CPU) {
+            char start_text[16];
+            snprintf(start_text, sizeof start_text, "$%04X", dbgwin->bps[idx].start);
+            select_tab(dbgwin, TAB_DISASM);
+            SetWindowTextA(dbgwin->jump, start_text);
+            on_jump(dbgwin);
+        }
+    }
+    return 0;
+}
+
+static LRESULT CALLBACK dbg_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    debugger *dbgwin = g_dbg;
+    if (msg == WM_GETMINMAXINFO) {
+        const int dpi = dbgwin && dbgwin->dpi ? dbgwin->dpi : 96;
+        ((MINMAXINFO *)lparam)->ptMinTrackSize.x = MulDiv(980, dpi, 96);
+        ((MINMAXINFO *)lparam)->ptMinTrackSize.y = MulDiv(600, dpi, 96);
+        return 0;
+    }
+    if (!dbgwin || dbgwin->hwnd != hwnd) return DefWindowProcA(hwnd, msg, wparam, lparam);
 
     switch (msg) {
     case WM_SIZE:
-        layout(d);
+        layout(dbgwin);
         return 0;
+    case WM_DPICHANGED: {
+        const RECT *row = (const RECT *)lparam;
+        dbgwin->dpi = HIWORD(wparam);
+        make_fonts(dbgwin);
+        size_columns(dbgwin);
+        if (dbgwin->video) dbg_video_fonts(dbgwin->video, dbgwin->ui_font, dbgwin->mono, dbgwin->dpi);
+        SetWindowPos(hwnd, NULL, row->left, row->top, row->right - row->left, row->bottom - row->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        layout(dbgwin);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
     case WM_TIMER:
-        if (wp == TIMER_REFRESH && IsWindowVisible(hwnd)) {
-            const unsigned gen = nesdebug_generation(d->dbg);
-            const int stopped = nesdebug_is_stopped(d->dbg);
-            /* The cartridge's link runs on its own thread, stopped CPU or not. */
-            if (++d->fuji_ticks >= 5) {
-                d->fuji_ticks = 0;
-                if (d->page == PAGE_FUJINET) refresh_fujinet(d, 0);
-            }
-            if (gen != d->seen_gen || stopped != d->was_stopped) {
-                d->seen_gen = gen;
-                d->was_stopped = stopped;
-                refresh_all(d);
-            } else if (!stopped && ++d->running_ticks >= 5) {
-                d->running_ticks = 0;
-                refresh_status(d);
-                if (d->page == PAGE_CPU) { refresh_cpu(d); refresh_ram(d); }
-                else if (d->page == PAGE_DISASM) refresh_disasm(d);
-                else if (d->page == PAGE_PPU) refresh_ppu(d);
-                else if (d->page == PAGE_APU) refresh_apu(d);
-                else if (d->page == PAGE_CART) refresh_cart(d);
-            }
-        }
+        if (wparam == TIMER_REFRESH) tick(dbgwin);
         return 0;
     case WM_DBG_ACCEPT:
-        on_accept(d, (int)wp);
+        on_accept(dbgwin, (int)wparam);
         return 0;
     case WM_DBG_TAB:
-        complete_prompt(d);
+        complete_console(dbgwin);
+        return 0;
+    case WM_DBG_HISTORY:
+        history_step(dbgwin, (int)wparam);
+        return 0;
+    case WM_DBG_SYNC:
+        resync(dbgwin);
+        return 0;
+    case WM_DBG_GOTO:
+        goto_page(dbgwin, TAB_MEMORY);
+        set_mem_space(dbgwin, NESDEBUG_SPACE_CPU);
+        show_in_memory(dbgwin, (int)wparam, (int)wparam);
+        return 0;
+    case DBG_VIDEO_SHOW_MEMORY:          /* the Video tab's inspector: wp the space, lp the address */
+        goto_page(dbgwin, TAB_MEMORY);
+        set_mem_space(dbgwin, (int)wparam);
+        show_in_memory(dbgwin, (int)lparam, (int)lparam);
         return 0;
     case WM_NOTIFY:
-        if (((LPNMHDR)lp)->code == (UINT)TCN_SELCHANGE) {
-            show_page(d, (int)SendMessageA(d->tabs, TCM_GETCURSEL, 0, 0));
-            layout(d);
-            if (d->page == PAGE_FUJINET) refresh_fujinet(d, 0);
-            return 0;
+        return on_notify(dbgwin, (NMHDR *)lparam);
+    case WM_DRAWITEM:
+        if (wparam == IDC_RUN) {
+            draw_run_button(dbgwin, (const DRAWITEMSTRUCT *)lparam);
+            return TRUE;
         }
         break;
-    case WM_DRAWITEM:
-        if (wp == IDC_RUN) { draw_run_button(d, (const DRAWITEMSTRUCT *)lp); return TRUE; }
-        break;
-    case WM_CTLCOLORSTATIC:
-        if ((HWND)lp == d->status || (HWND)lp == d->cycles || (HWND)lp == d->disasm_hint ||
-            (HWND)lp == d->fuji_note) {
-            SetTextColor((HDC)wp, GetSysColor(COLOR_GRAYTEXT));
-            SetBkColor((HDC)wp, GetSysColor(COLOR_BTNFACE));
+    case WM_CTLCOLORSTATIC: {
+        HWND ctl = (HWND)lparam;
+        HDC dc = (HDC)wparam;
+        if (in_list(ctl, dbgwin->views, dbgwin->nviews)) {
+            /* read-only views on the window colour, as text views are */
+            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+        if (ctl == dbgwin->bp_msg) {
+            SetTextColor(dc, RGB(0xc0, 0x1c, 0x28));
+            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
+        if (ctl == dbgwin->status && notice_showing(dbgwin)) {
+            SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+        }
+        if (in_list(ctl, dbgwin->dim, dbgwin->ndim)) {
+            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
             return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
         }
         break;
+    }
+    case WM_MOUSEWHEEL: {
+        /* the disassembly scrolls under the pointer, focused or not */
+        POINT ptr = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+        RECT row;
+        GetWindowRect(dbgwin->disasm, &row);
+        if (page_visible(dbgwin, TAB_DISASM) && PtInRect(&row, ptr)) return SendMessageA(dbgwin->disasm, msg, wparam, lparam);
+        break;
+    }
     case WM_COMMAND: {
-        const int id = LOWORD(wp);
-        if (id >= IDC_FLAG0 && id <= IDC_FLAG_LAST && HIWORD(wp) == BN_CLICKED) {
-            static const int flag_ids[6] = { NES_FLAG_N, NES_FLAG_V, NES_FLAG_D, NES_FLAG_I, NES_FLAG_Z, NES_FLAG_C };
-            if (nesdebug_is_stopped(d->dbg))
-                nesdebug_cpu_set(d->dbg, flag_ids[id - IDC_FLAG0],
-                                 SendMessageA(d->flag[id - IDC_FLAG0], BM_GETCHECK, 0, 0) == BST_CHECKED);
-            refresh_cpu(d);
+        const int ctl_id = LOWORD(wparam);
+        if (ctl_id >= IDC_CHK0 && ctl_id <= IDC_CHK_LAST && HIWORD(wparam) == BN_CLICKED) {
+            on_check(dbgwin, ctl_id - IDC_CHK0);
             return 0;
         }
-        if (id >= IDC_SAVE_KIND0 && id <= IDC_SAVE_KIND_LAST) { save_file(d, id - IDC_SAVE_KIND0); return 0; }
-        switch (id) {
-        case IDC_RUN: toggle_run(d); return 0;
-        case IDC_STEP: nesdebug_step(d->dbg); refresh_all(d); return 0;
-        case IDC_OVER: nesdebug_step_over(d->dbg); refresh_all(d); return 0;
-        case IDC_OUT: nesdebug_step_out(d->dbg); refresh_all(d); return 0;
-        case IDC_SCAN: nesdebug_scanline(d->dbg, 1); refresh_all(d); return 0;
-        case IDC_FRAME: nesdebug_frame(d->dbg, 1); refresh_all(d); return 0;
-        case IDC_LOAD_SYMBOLS: load_symbols(d); return 0;
-        case IDC_SAVE: save_menu(d); return 0;
-        case IDC_HELP_BTN: nes_help_for(d->hwnd); return 0;
-        case IDC_FOLLOW_PC: refresh_disasm(d); return 0;
-        case IDC_PPU_VIEW:
-        case IDC_PPU_PALETTE:
-            if (HIWORD(wp) == CBN_SELCHANGE) refresh_ppu(d);
-            return 0;
-        case IDC_BP_ADD: add_breakpoint(d); return 0;
-        case IDC_BP_REMOVE:
-        case IDC_BP_ENABLE: {
-            int sel = (int)SendMessageA(d->bp_list, LB_GETCURSEL, 0, 0);
-            if (sel >= 0 && sel < d->nbps) {
-                if (id == IDC_BP_REMOVE) nesdebug_breakpoint_remove(d->dbg, d->bps[sel].id);
-                else nesdebug_breakpoint_enable(d->dbg, d->bps[sel].id, !d->bps[sel].enabled);
-                refresh_bps(d);
-                refresh_disasm(d);
-            }
+        if (ctl_id >= IDC_SAVE_KIND0 && ctl_id <= IDC_SAVE_KIND_LAST) {
+            on_save(dbgwin, ctl_id - IDC_SAVE_KIND0);
             return 0;
         }
-        case IDC_BP_LIST:
-            if (HIWORD(wp) == LBN_DBLCLK) {
-                int sel = (int)SendMessageA(d->bp_list, LB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < d->nbps) {
-                    char a[16];
-                    snprintf(a, sizeof a, "$%04X", d->bps[sel].start);
-                    TabCtrl_SetCurSel(d->tabs, PAGE_DISASM);
-                    show_page(d, PAGE_DISASM);
-                    layout(d);
-                    jump_to(d, a);
+        switch (ctl_id) {
+        case IDC_RUN: on_run(dbgwin); return 0;
+        case IDC_STEP: nesdebug_step(dbgwin->dbg); settle_and_sync(dbgwin, 1); return 0;
+        case IDC_OVER: nesdebug_step_over(dbgwin->dbg); settle_and_sync(dbgwin, 1); return 0;
+        case IDC_OUT: nesdebug_step_out(dbgwin->dbg); settle_and_sync(dbgwin, 1); return 0;
+        case IDC_SCAN: nesdebug_scanline(dbgwin->dbg, 1); settle_and_sync(dbgwin, 1); return 0;
+        case IDC_FRAME: nesdebug_frame(dbgwin->dbg, 1); settle_and_sync(dbgwin, 1); return 0;
+        case IDC_RUN_TO: on_run_to(dbgwin); return 0;
+        case IDC_TOGGLE_BP: on_toggle_bp(dbgwin); return 0;
+        case IDC_HELP_BTN: nes_help_for(dbgwin->hwnd); return 0;
+        case IDC_SYMBOLS: on_symbols(dbgwin); return 0;
+        case IDC_CLEAR_SYMS:
+            nesdebug_clear_symbols(dbgwin->dbg);
+            say(dbgwin, "Symbols cleared (the register and mailbox names stay)");
+            resync(dbgwin);
+            return 0;
+        case IDC_SAVE: save_menu(dbgwin); return 0;
+        case IDC_SYM_LIST:
+            if (HIWORD(wparam) == LBN_DBLCLK) {
+                /* a symbol's row opens the disassembly there; the address was taken with the row */
+                const int sel = (int)SendMessageA(dbgwin->sym_list, LB_GETCURSEL, 0, 0);
+                if (sel >= 0 && sel < dbgwin->sym_lines) {
+                    char where[16];
+                    snprintf(where, sizeof where, "$%04X", dbgwin->sym_addr[sel]);
+                    select_tab(dbgwin, TAB_DISASM);
+                    SetWindowTextA(dbgwin->jump, where);
+                    on_jump(dbgwin);
                 }
             }
             return 0;
+        case IDC_SYM_BREAK:
+        case IDC_SYM_MEM: {
+            const int sel = (int)SendMessageA(dbgwin->sym_list, LB_GETCURSEL, 0, 0);
+            if (sel < 0 || sel >= dbgwin->sym_lines) {
+                toast(dbgwin, "Select a symbol first");
+            } else if (ctl_id == IDC_SYM_BREAK) {
+                const uint16_t addr = dbgwin->sym_addr[sel];
+                char msg[64];
+                if (!nesdebug_breakpoint_check(dbgwin->dbg, addr)) nesdebug_breakpoint_toggle(dbgwin->dbg, addr);
+                snprintf(msg, sizeof msg, "Breakpoint at $%04X", addr);
+                toast(dbgwin, msg);
+                resync(dbgwin);
+            } else {
+                goto_page(dbgwin, TAB_MEMORY);
+                set_mem_space(dbgwin, NESDEBUG_SPACE_CPU);
+                show_in_memory(dbgwin, dbgwin->sym_addr[sel], dbgwin->sym_addr[sel]);
+            }
+            return 0;
+        }
+        case IDC_POPOUT: pop_out(dbgwin, dbgwin->page); return 0;
+        case IDC_MEM_BACK: on_mem_page(dbgwin, -1); return 0;
+        case IDC_MEM_ON: on_mem_page(dbgwin, 1); return 0;
+        case IDC_SRCH_NEXT: do_search(dbgwin, 0); return 0;
+        case IDC_SRCH_PREV: do_search(dbgwin, 1); return 0;
+        case IDC_FOLLOW_PC: refresh_disasm(dbgwin); return 0;
+        case IDC_BP_TYPE:
+        case IDC_BP_SPACE:
+            if (HIWORD(wparam) == CBN_SELCHANGE) on_bp_choice(dbgwin, ctl_id == IDC_BP_SPACE);
+            return 0;
+        case IDC_BP_SET: on_bp_set(dbgwin); return 0;
+        case IDC_MEM_SPACE:
+            if (HIWORD(wparam) == CBN_SELCHANGE) set_mem_space(dbgwin, (int)SendMessageA(dbgwin->mem_space, CB_GETCURSEL, 0, 0));
+            return 0;
+        case IDC_BP_ADD: on_bp_add(dbgwin); return 0;
+        case IDC_BP_REMOVE: on_bp_remove(dbgwin); return 0;
+        case IDC_BP_HITS:
+            nesdebug_breakpoint_clear_hits(dbgwin->dbg);
+            resync(dbgwin);
+            return 0;
         case IDC_BP_CLEAR:
-            nesdebug_breakpoint_clear(d->dbg);
-            refresh_bps(d);
-            refresh_disasm(d);
+            nesdebug_breakpoint_clear(dbgwin->dbg);
+            set_label(dbgwin->bp_msg, "");
+            resync(dbgwin);
+            return 0;
+        case IDC_SYM_FILTER:
+            if (HIWORD(wparam) == EN_CHANGE) refresh_symbols(dbgwin);       /* the list follows the typing */
+            return 0;
+        case IDC_WT_ADD: add_watch(dbgwin); return 0;
+        case IDC_WT_MEM: {
+            uint16_t low, high;
+            if (watch_range(dbgwin, &low, &high)) {
+                goto_page(dbgwin, TAB_MEMORY);
+                set_mem_space(dbgwin, NESDEBUG_SPACE_CPU);       /* a watch is a CPU address */
+                show_in_memory(dbgwin, low, high);
+            } else {
+                toast(dbgwin, "Select a watch that resolves to an address");
+            }
+            return 0;
+        }
+        case IDC_WT_BRK: {
+            uint16_t low, high;
+            if (watch_range(dbgwin, &low, &high)) watch_break(dbgwin, low, high);
+            else toast(dbgwin, "Select a watch that resolves to an address");
+            return 0;
+        }
+        case IDC_WT_REMOVE: {
+            const int sel = (int)SendMessageA(dbgwin->wt_list, LB_GETCURSEL, 0, 0);
+            if (sel >= 0) {
+                neswatch_remove(sel);
+                refresh_watches(dbgwin);
+            }
+            return 0;
+        }
+        case IDC_H_REC0:
+            nesdebug_trace_enable(dbgwin->dbg, SendMessageA((HWND)lparam, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            hist_refresh(dbgwin, 0, 1);
+            return 0;
+        case IDC_H_REC1:
+            nesdebug_history_enable(dbgwin->dbg, SendMessageA((HWND)lparam, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            hist_refresh(dbgwin, 1, 1);
+            return 0;
+        case IDC_H_CLEAR0:
+            nesdebug_trace_clear(dbgwin->dbg);
+            hist_refresh(dbgwin, 0, 1);
+            return 0;
+        case IDC_H_CLEAR1:
+            nesdebug_history_clear(dbgwin->dbg);
+            hist_refresh(dbgwin, 1, 1);
+            return 0;
+        case IDC_H_FILTER0:
+        case IDC_H_FILTER1:
+            if (HIWORD(wparam) == CBN_SELCHANGE) hist_refresh(dbgwin, ctl_id == IDC_H_FILTER1, 1);
             return 0;
         case IDC_FUJI_CLEAR:
-            nesdebug_fujinet_trace_clear(d->dbg);
-            refresh_fujinet(d, 1);
+            nesdebug_fujinet_trace_clear(dbgwin->dbg);
+            refresh_fujinet(dbgwin, 1);
             return 0;
-        case IDCANCEL:
-            detach_and_hide(d);
-            return 0;
+        case IDCANCEL: hide_window(dbgwin); return 0;
         default: break;
         }
         break;
     }
     case WM_CLOSE:
-        /* Hide and let the machine run; F12 brings it back, stopped. */
-        detach_and_hide(d);
+        /* Hide and let the machine run; F12 brings it back. */
+        hide_window(dbgwin);
         return 0;
-    case WM_DESTROY:
+    case WM_DESTROY: {
+        int ptr;
         KillTimer(hwnd, TIMER_REFRESH);
-        DeleteObject(d->mono);
-        DeleteObject(d->accent);
-        DestroyAcceleratorTable(d->accel);
-        free(d->pic_px);
-        free(d);
+        for (ptr = 0; ptr < TAB_COUNT; ptr++)     /* a peeled-off tab's window goes with the debugger */
+            if (dbgwin->popped[ptr]) {
+                HWND pop = dbgwin->popped[ptr];
+                dbgwin->popped[ptr] = NULL;
+                DestroyWindow(pop);
+            }
+        DeleteObject(dbgwin->ui_font);
+        DeleteObject(dbgwin->ui_bold);
+        DeleteObject(dbgwin->mono);
+        DeleteObject(dbgwin->accent);
+        DeleteObject(dbgwin->bp_on);
+        DeleteObject(dbgwin->bp_off);
+        DestroyAcceleratorTable(dbgwin->accel);
+        free(dbgwin->sym_text);
+        free(dbgwin);
         g_dbg = NULL;
         return 0;
+    }
     default: break;
     }
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
 }
 
-/* ---- entry points ---------------------------------------------------------------------- */
+/* ---- entry points ----------------------------------------------------------------- */
+
+static void register_class(HINSTANCE inst, const char *name, WNDPROC proc, HBRUSH background, UINT style)
+{
+    WNDCLASSEXA wc;
+    memset(&wc, 0, sizeof wc);
+    wc.cbSize = sizeof wc;
+    wc.style = style;
+    wc.lpfnWndProc = proc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = background;
+    wc.lpszClassName = name;
+    if (proc == dbg_proc) wc.hIcon = LoadIconA(inst, MAKEINTRESOURCEA(IDI_APPICON));
+    RegisterClassExA(&wc);
+}
+
+/* A tab named by an environment variable: a number, or a tab's name or label
+ * (any case), or the start of one, or of a word of a label ("memory",
+ * "i/o"...), or one of the old names. -1 if unset or unknown. */
+static int tab_from_env_var(const char *var)
+{
+    const char *tab = getenv(var);
+    char *end;
+    long num;
+    size_t len;
+    int idx, pass;
+    if (!tab || !*tab) return -1;
+    for (idx = 0; idx < (int)(sizeof k_tab_aliases / sizeof k_tab_aliases[0]); idx++)
+        if (_stricmp(tab, k_tab_aliases[idx].name) == 0) return k_tab_aliases[idx].tab;
+    num = strtol(tab, &end, 10);
+    if (end != tab && *end == '\0')
+        return (num >= 0 && num < TAB_COUNT) ? (int)num : -1;
+    len = strlen(tab);
+    for (pass = 0; pass < 3; pass++)
+        for (idx = 0; idx < TAB_COUNT; idx++) {
+            if (pass == 0 && _strnicmp(tab, k_tabs[idx].name, len) == 0) return idx;
+            if (pass == 1 && _strnicmp(tab, k_tabs[idx].label, len) == 0) return idx;
+            if (pass == 2) {
+                const char *ptr = k_tabs[idx].label;
+                while ((ptr = strchr(ptr, ' ')) != NULL)
+                    if (_strnicmp(tab, ++ptr, len) == 0) return idx;
+            }
+        }
+    return -1;
+}
+
+/* For captures and tests: NES_DEBUGGER_HISTORY records from the start, NES_DEBUGGER_WATCH="x,y"
+ * adds watches, NES_DEBUGGER_WATCH_BREAK="x" a write-when-changed breakpoint on it,
+ * NES_DEBUGGER_MEM_GOTO="x" shows it in Memory, NES_DEBUGGER_POPOUT=<tab> peels a tab off.
+ * (the unprefixed NES_HISTORY, _WATCH, _WATCH_BREAK, _MEM_GOTO, _POPOUT still work). */
+/* The prefixed name every frontend reads, else the older unprefixed one. */
+static const char *env_hook(const char *name, const char *fallback)
+{
+    const char *val = getenv(name);
+    return val && *val ? val : getenv(fallback);
+}
+
+static void apply_env_hooks(debugger *dbgwin)
+{
+    const char *hist = env_hook("NES_DEBUGGER_HISTORY", "NES_HISTORY"), *watch_text = env_hook("NES_DEBUGGER_WATCH", "NES_WATCH"), *break_text = env_hook("NES_DEBUGGER_WATCH_BREAK", "NES_WATCH_BREAK"),
+               *goto_text = env_hook("NES_DEBUGGER_MEM_GOTO", "NES_MEM_GOTO");
+    uint16_t low, high;
+    int pop;
+
+    if (hist && *hist && *hist != '0') nesdebug_history_enable(dbgwin->dbg, 1);
+    if (watch_text && *watch_text) {
+        char list[512], *item, *save = NULL;
+        snprintf(list, sizeof list, "%s", watch_text);
+        for (item = strtok_s(list, ",", &save); item; item = strtok_s(NULL, ",", &save)) {
+            item = strip(item);
+            if (*item) neswatch_add(item);
+        }
+    }
+    if (break_text && *break_text && nessym_parse_range(dbgwin->dbg, break_text, &low, &high)) {
+        char err[160];
+        nesdebug_breakpoint_add_in(dbgwin->dbg, NESDEBUG_SPACE_CPU, NESDEBUG_BP_WRITE, low, high, "value != old", err, sizeof err);
+    }
+    if (goto_text && *goto_text && nessym_parse_range(dbgwin->dbg, goto_text, &low, &high)) show_in_memory(dbgwin, low, high);
+    pop = tab_from_env_var("NES_DEBUGGER_POPOUT");
+    if (pop < 0) pop = tab_from_env_var("NES_POPOUT");
+    if (pop >= 0) pop_out(dbgwin, pop);
+    resync(dbgwin);
+}
 
 void nes_debugger_show(HWND parent, nessession *session)
 {
+    static int registered;
+    INITCOMMONCONTROLSEX icc;
     HINSTANCE inst;
-    WNDCLASSA wc;
-    debugger *d;
-    ACCEL accels[6];
-    const char *tab;
+    debugger *dbgwin;
+    ACCEL accels[7];
+    int tab;
 
     if (g_dbg) {
-        if (!IsWindowVisible(g_dbg->hwnd)) {
-            ShowWindow(g_dbg->hwnd, SW_SHOW);
-            attach(g_dbg);
+        const int was_hidden = !IsWindowVisible(g_dbg->hwnd);
+        dbgwin = g_dbg;
+        ShowWindow(dbgwin->hwnd, IsIconic(dbgwin->hwnd) ? SW_RESTORE : SW_SHOW);
+        SetForegroundWindow(dbgwin->hwnd);
+        if (was_hidden) {
+            start_and_refresh(dbgwin);
         } else {
-            nesdebug_stop(g_dbg->dbg);
-            refresh_all(g_dbg);
+            nesdebug_stop(dbgwin->dbg);           /* asked for while showing: stop, as attaching does */
+            settle_and_sync(dbgwin, 1);
         }
-        SetForegroundWindow(g_dbg->hwnd);
         return;
     }
 
+    icc.dwSize = sizeof icc;
+    icc.dwICC = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
+    InitCommonControlsEx(&icc);
     inst = (HINSTANCE)GetWindowLongPtrA(parent, GWLP_HINSTANCE);
-
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = dbg_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = "NESDebuggerWindow";
-    RegisterClassA(&wc);
-
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = pic_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = "NESDbgPixels";
-    RegisterClassA(&wc);
-
-    d = calloc(1, sizeof *d);
-    if (!d) return;
-    d->session = session;
-    d->dbg = nessession_debugger(session);
-    d->pic_px = calloc(NESDEBUG_VIEW_MAX_PIXELS, sizeof *d->pic_px);
-    g_dbg = d;
-
-    d->hwnd = CreateWindowExA(0, "NESDebuggerWindow", "Debugger", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, NULL, NULL, inst, NULL);
-    if (!d->hwnd) { free(d->pic_px); free(d); g_dbg = NULL; return; }
-
-    d->ui = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-    d->mono = CreateFontA(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                          CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
-    d->accent = CreateSolidBrush(RGB((NESSESSION_ACCENT_RGB >> 16) & 0xff, (NESSESSION_ACCENT_RGB >> 8) & 0xff,
-                                     NESSESSION_ACCENT_RGB & 0xff));
-    {
-        /* the monospace line, for following a log's end */
-        HDC dc = GetDC(d->hwnd);
-        HGDIOBJ prev = SelectObject(dc, d->mono);
-        TEXTMETRICA tm;
-        d->mono_h = 15;
-        if (GetTextMetricsA(dc, &tm)) d->mono_h = tm.tmHeight;
-        SelectObject(dc, prev);
-        ReleaseDC(d->hwnd, dc);
+    if (!inst) inst = GetModuleHandleA(NULL);
+    if (!registered) {
+        register_class(inst, DBG_CLASS, dbg_proc, (HBRUSH)(COLOR_BTNFACE + 1), CS_HREDRAW | CS_VREDRAW);
+        register_class(inst, DISASM_CLASS, disasm_proc, NULL, CS_DBLCLKS);
+        register_class(inst, PAGE_CLASS, page_proc, (HBRUSH)(COLOR_BTNFACE + 1), 0);
+        register_class(inst, POP_CLASS, pop_proc, (HBRUSH)(COLOR_BTNFACE + 1), 0);
+        registered = 1;
     }
 
-    build_controls(d);
+    dbgwin = calloc(1, sizeof *dbgwin);
+    if (!dbgwin) return;
+    dbgwin->session = session;
+    dbgwin->dbg = nessession_debugger(session);
+    if (!dbgwin->dbg) {
+        free(dbgwin);
+        MessageBoxA(parent, "The debugger could not be created for this session.", "Debugger Unavailable",
+                    MB_ICONERROR);
+        return;
+    }
+    dbgwin->selected = -1;
+    dbgwin->pc_line = -1;
+    dbgwin->fuji_count = -1;
+    dbgwin->h_seen[0] = dbgwin->h_seen[1] = (uint64_t)-1;
+    g_dbg = dbgwin;
 
-    /* F5/F7/F8/Shift+F8/F12 work wherever the focus is inside the window. */
+    dbgwin->dpi = window_dpi(parent);
+    /* owned by the main window: over it, and gone with it */
+    dbgwin->hwnd = CreateWindowExA(0, DBG_CLASS, "NES Debugger", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT,
+                              CW_USEDEFAULT, scaled(dbgwin, 1250), scaled(dbgwin, 860), parent, NULL, inst, NULL);
+    if (!dbgwin->hwnd) {
+        free(dbgwin);
+        g_dbg = NULL;
+        return;
+    }
+    if (window_dpi(dbgwin->hwnd) != dbgwin->dpi) {
+        /* placed on a monitor of another DPI than the parent's */
+        dbgwin->dpi = window_dpi(dbgwin->hwnd);
+        SetWindowPos(dbgwin->hwnd, NULL, 0, 0, scaled(dbgwin, 1250), scaled(dbgwin, 860), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    make_fonts(dbgwin);
+    dbgwin->accent = CreateSolidBrush(ACCENT_RGB);
+    dbgwin->bp_on = CreateSolidBrush(RGB(0xe0, 0x1b, 0x24));
+    dbgwin->bp_off = CreateSolidBrush(RGB(0x9a, 0x99, 0x96));
+
+    build_controls(dbgwin);
+
+    /* F5/F7/F8/Shift+F8/Shift+F7/F9/F12 work wherever the focus is in the
+     * window. */
     accels[0].fVirt = FVIRTKEY;          accels[0].key = VK_F5;  accels[0].cmd = IDC_RUN;
     accels[1].fVirt = FVIRTKEY;          accels[1].key = VK_F7;  accels[1].cmd = IDC_STEP;
     accels[2].fVirt = FVIRTKEY;          accels[2].key = VK_F8;  accels[2].cmd = IDC_OVER;
     accels[3].fVirt = FVIRTKEY | FSHIFT; accels[3].key = VK_F8;  accels[3].cmd = IDC_OUT;
-    accels[4].fVirt = FVIRTKEY;          accels[4].key = VK_F12; accels[4].cmd = IDCANCEL;
-    accels[5].fVirt = FVIRTKEY | FSHIFT; accels[5].key = VK_F7;  accels[5].cmd = IDC_FRAME;
-    d->accel = CreateAcceleratorTableA(accels, 6);
+    accels[4].fVirt = FVIRTKEY | FSHIFT; accels[4].key = VK_F7;  accels[4].cmd = IDC_FRAME;
+    accels[5].fVirt = FVIRTKEY;          accels[5].key = VK_F9;  accels[5].cmd = IDC_TOGGLE_BP;
+    accels[6].fVirt = FVIRTKEY;          accels[6].key = VK_F12; accels[6].cmd = IDCANCEL;
+    dbgwin->accel = CreateAcceleratorTableA(accels, 7);
 
-    tab = getenv("NES_DEBUGGER_TAB");
-    d->page = PAGE_PROMPT;
-    if (tab && *tab) {
-        int t = atoi(tab);
-        if (t >= 0 && t < PAGE_COUNT) d->page = t;
-    }
-    SendMessageA(d->tabs, TCM_SETCURSEL, (WPARAM)d->page, 0);
-    show_page(d, d->page);
-    layout(d);
+    tab = tab_from_env_var("NES_DEBUGGER_TAB");
+    dbgwin->page = tab >= 0 ? tab : TAB_CONSOLE;
+    SendMessageA(dbgwin->tabs, TCM_SETCURSEL, (WPARAM)dbgwin->page, 0);
+    show_page(dbgwin, dbgwin->page);
+    layout(dbgwin);
 
-    ShowWindow(d->hwnd, SW_SHOW);
-    attach(d);
-}
-
-int nes_debugger_pretranslate(MSG *msg)
-{
-    if (!g_dbg || !g_dbg->accel) return 0;
-    if (msg->hwnd != g_dbg->hwnd && !IsChild(g_dbg->hwnd, msg->hwnd)) return 0;
-    if (msg->message == WM_KEYDOWN && msg->wParam == VK_F12) { detach_and_hide(g_dbg); return 1; }
-    return TranslateAcceleratorA(g_dbg->hwnd, g_dbg->accel, msg) ? 1 : 0;
+    ShowWindow(dbgwin->hwnd, SW_SHOW);
+    if (dbgwin->page == TAB_CONSOLE) SetFocus(dbgwin->con_in);
+    start_and_refresh(dbgwin);
+    apply_env_hooks(dbgwin);
 }
 
 int nes_debugger_visible(void)
@@ -1509,6 +3482,23 @@ int nes_debugger_visible(void)
 
 void nes_debugger_toggle(HWND parent, nessession *session)
 {
-    if (nes_debugger_visible()) detach_and_hide(g_dbg);
+    if (nes_debugger_visible()) hide_window(g_dbg);
     else nes_debugger_show(parent, session);
+}
+
+int nes_debugger_pretranslate(MSG *msg)
+{
+    int ptr, mine;
+    if (!g_dbg || !g_dbg->accel) return 0;
+    mine = msg->hwnd == g_dbg->hwnd || IsChild(g_dbg->hwnd, msg->hwnd);
+    for (ptr = 0; !mine && ptr < TAB_COUNT; ptr++)     /* a peeled-off tab's window too */
+        if (g_dbg->popped[ptr] && (msg->hwnd == g_dbg->popped[ptr] || IsChild(g_dbg->popped[ptr], msg->hwnd))) mine = 1;
+    if (!mine) return 0;
+    /* F12 closes without waiting for the accelerator (Windows keeps F12 for
+     * debuggers); its key-up goes with it */
+    if (msg->message == WM_KEYDOWN && msg->wParam == VK_F12) {
+        hide_window(g_dbg);
+        return 1;
+    }
+    return TranslateAcceleratorA(g_dbg->hwnd, g_dbg->accel, msg) ? 1 : 0;
 }

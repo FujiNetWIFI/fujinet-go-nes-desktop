@@ -22,6 +22,7 @@ add_executable(fujinet-go-nes-windows WIN32
   help/help_window.c
   controllers/controller_window.c
   debugger/dbg_window.c
+  debugger/dbg_video.c
   resource.rc
 )
 target_include_directories(fujinet-go-nes-windows PRIVATE
