@@ -19,6 +19,8 @@
   <string>${PROJECT_VERSION}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.games</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.3</string>
   <key>NSHighResolutionCapable</key>
