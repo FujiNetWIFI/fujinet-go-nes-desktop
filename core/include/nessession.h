@@ -46,6 +46,9 @@ extern "C" {
  * the debugger's current line, the FujiNet status dot): the NES logo's red.
  * (The icon is in the console's two greys; see tools/icons/make-icons.py.) */
 #define NESSESSION_ACCENT_RGB 0xC4001E
+/* Text on the accent, and the accent as a fill or text on a dark theme. */
+#define NESSESSION_ACCENT_INK_RGB 0xFFFFFF
+#define NESSESSION_ACCENT_LIGHT_RGB 0xFF6B7F
 
 typedef struct nessession nessession;
 typedef struct nesdebug nesdebug;

@@ -100,7 +100,7 @@ public:
 
 	void UpdateFrame(RenderedFrame& frame) override
 	{
-		_host->PublishFrame((const uint32_t*)frame.FrameBuffer, frame.Width, frame.Height);
+		_host->PublishFrame((const uint32_t*)frame.FrameBuffer, frame.Width, frame.Height, frame.FrameNumber);
 	}
 
 	void ClearFrame() override
@@ -485,10 +485,16 @@ std::string MesenHost::GetLog()
 // video
 // ---------------------------------------------------------------------------
 
-void MesenHost::PublishFrame(const uint32_t* argb, uint32_t width, uint32_t height)
+void MesenHost::PublishFrame(const uint32_t* argb, uint32_t width, uint32_t height, uint32_t frameNumber)
 {
 	if(!argb || width == 0 || height == 0) {
 		return;
+	}
+	{
+		std::lock_guard<std::mutex> tap(_tapLock);
+		if(_frameTap) {
+			_frameTap(_frameTapCtx, argb, width, height, frameNumber);
+		}
 	}
 	_frameCount++;
 	size_t n = (size_t)width * height;
@@ -513,6 +519,13 @@ void MesenHost::PublishFrame(const uint32_t* argb, uint32_t width, uint32_t heig
 	if(_frameCb) {
 		_frameCb(_frameCbCtx);
 	}
+}
+
+void MesenHost::SetFrameTap(FrameTap tap, void* ctx)
+{
+	std::lock_guard<std::mutex> lock(_tapLock);
+	_frameTap = tap;
+	_frameTapCtx = ctx;
 }
 
 void MesenHost::SetFrameCallback(FrameCallback cb, void* ctx)

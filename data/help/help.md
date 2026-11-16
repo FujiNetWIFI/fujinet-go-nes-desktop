@@ -378,8 +378,8 @@ empty for CONFIG) and `bindings` (the controls that differ from the defaults).
 # Debugger
 
 The Debugger (<kbd>F12</kbd>) stops the console and shows what it is doing.
-It has eight tabs; closing it lets the console go on as it was. The engine is
-MesenCE's own.
+It has twelve tabs; closing it lets the console go on as it was. The engine is
+MesenCE's own, so it costs some speed while it is open.
 
 | Button | Does |
 |---|---|
@@ -389,64 +389,144 @@ MesenCE's own.
 | Step Out (<kbd>Shift+F8</kbd>) | On until the routine returns |
 | Scanline+1 | On to the next scanline |
 | Frame+1 | On to the next frame |
+| Run to Cursor | On to the line selected in the Disassembly |
+| Pop Out | Moves the tab that shows into a window of its own; **Dock** puts it back |
 | Help | Opens the topic of the tab that shows |
 
-<!-- context: debugger/prompt -->
-## Prompt
+The 6502's registers and flags are in a strip under every tab: click one, type
+a new value and press Enter while the console is stopped. The strip also shows
+the cycle count, the scanline and dot, and the pending IRQ and NMI.
 
-The Prompt takes commands, with completion on <kbd>Tab</kbd>. Numbers and
-conditions are Mesen expressions. `help` lists the commands.
+<!-- context: debugger/console -->
+## Console
+
+The Console takes commands, with completion on <kbd>Tab</kbd> and recall on
+<kbd>Up</kbd> and <kbd>Down</kbd>. Numbers and conditions are Mesen
+expressions: registers (`a`, `x`, `y`, `sp`, `pc`, `ps`), `[$addr]` for a
+byte, `{$addr}` for a word, labels, `cycle`, `scanline` and `frame`. A
+breakpoint's condition is such an expression; on a read or write it can use
+`value`, `address` and `old`. `help` lists the commands.
 
 | Command | Does |
 |---|---|
-| `break` | An execute breakpoint |
-| `bpr`, `bpw` | Data reads or writes, with a Mesen expression as the condition |
-| `print` | Evaluates an expression |
-| `mem` | Dumps memory |
-| `poke` | Writes bytes |
-| `ppu` | The PPU's state |
-| `label`, `labels` | Name an address; load a symbol file |
+| `step`, `over`, `out` | One instruction; over a JSR; to the return |
+| `run`, `stop` | Go on, or break |
+| `frame`, `scanline` | Run some frames or scanlines |
 | `runto` | Runs to an address |
+| `break` | An execute breakpoint |
+| `bpr`, `bpw`, `bpa` | Data reads, writes, or either |
+| `delete`, `enable`, `clear` | Manage breakpoints (also `disable`, `breaks`, `hits`) |
+| `print`, `regs`, `set` | Evaluate; show or set the registers |
+| `mem`, `poke`, `ppu` | Dumps memory; writes bytes; the PPU bus |
+| `find`, `watch`, `unwatch` | Searches memory; keeps a watch list |
+| `trace` | The instruction trace |
+| `label`, `labels`, `symbols` | Name an address; load a file; list labels |
 | `disasm` | Disassembles |
-| `cart` | The cartridge: link, mailbox, load progress, mapper |
-
-<!-- context: debugger/cpu -->
-## CPU and RAM
-
-The 6502's registers and flags, and an editable hex view of the 2K of RAM.
-Click a value to edit it while stopped.
+| `map`, `io`, `cart` | The memory map; the controllers and ports; the cartridge |
+| `sound`, `video` | The APU's channels; the Video tab as text |
+| `save` | Saves state to a file |
 
 <!-- context: debugger/disassembly -->
 ## Disassembly
 
 The 6502 disassembled at the PC, with the opcode bytes, labels and the
-breakpoints in the margin. Click a line to toggle its breakpoint. Follow PC
-keeps the current line in view. Symbols load from ld65 (`-Ln` or VICE), ca65
-`.dbg` and Mesen `.mlb` files; the NES registers and the FujiNet mailbox are
-labelled out of the box.
+breakpoints in the margin (red when on, grey when off). Click a line to toggle
+its breakpoint, or press <kbd>F9</kbd>. **Follow PC** keeps the current line in
+view. Symbols load from ld65 (`-Ln` or VICE), ca65 `.dbg` and Mesen `.mlb`
+files; the NES registers and the FujiNet mailbox are labelled out of the box.
 
-<!-- context: debugger/ppu -->
-## PPU
+<!-- context: debugger/memory -->
+## Memory
 
-The PPU's registers, the nametables with the scroll window, the pattern
-tables, the sprites, the palette and OAM.
-
-<!-- context: debugger/apu -->
-## APU and input
-
-The APU's channels and the controllers' state as the CPU reads them.
+A hex view of a memory space: the CPU's 64K as it sees it, or the PPU bus, OAM,
+palette, PRG, CHR or WRAM. Type an address or a label after **Address:** and
+press Enter. **Poke** writes a byte while the console is stopped. **Search**
+finds hex bytes or text, and **Find Next** and **Find Previous** step through
+the matches. Rows are named by region (RAM, PPU registers, the PRG window and
+its bank).
 
 <!-- context: debugger/breakpoints -->
 ## Breakpoints
 
-The list of breakpoints with their conditions. **Add**, **Remove**, and the
-check box to turn one off.
+Breakpoints stop the console on an execute, a read, a write, or either, in the
+CPU's address space or the PPU's (nametables and CHR, the palette, OAM). Add
+one with its type, its range and an optional condition (for example
+`value != old`). Each one in the list can be turned off and on, shows how often
+it was hit, and can be removed; **Clear Hits** zeroes the counts and **Clear
+All** removes them all. The stop says what happened: the value written, and
+what it was.
+
+<!-- context: debugger/watches -->
+## Watches
+
+Memory you want to keep an eye on, with its live value while the console is
+stopped. **Memory** shows it in the Memory tab, **Break on Change** stops the
+console when it changes, and **Remove** drops it.
 
 <!-- context: debugger/cart -->
-## Cart
+## Cart and I/O
 
-The cartridge: the link, the mailbox, the load progress, the mapper, the PRG
-and CHR slots, and the IRQ.
+The cartridge (its link, the mailbox, the load progress and boot state), the
+mapper with its PRG and CHR slots and the IRQ, the memory map (every range the
+console answers in), and the controllers, keyboard and tape as the CPU reads
+them.
+
+<!-- context: debugger/trace -->
+## Trace
+
+Every instruction the 6502 runs, live: **Record** turns it on, each instruction
+is kept with its registers, and **Clear** empties it. The log keeps only the
+last 30000. The filter shows All, Branches (jumps, calls, returns and branches) or
+a Range of addresses. Recording slows the console.
+
+<!-- context: debugger/history -->
+## History
+
+The same record as the Trace tab, shown when the console stops: the
+instructions that led there, oldest first.
+
+<!-- context: debugger/video -->
+## Video
+
+The PPU, with the picture on the left and its sections on the right. The
+debugger records the PPU registers for each line, so split screens and scrolling
+show.
+
+| View | Shows |
+|---|---|
+| Display | The last finished frame, as the screen showed it |
+| Decoded | One source: Nametables, Patterns, Sprites or Palette |
+| Beam | Stopped only: where the beam was in this frame |
+| Values | The tables as hex |
+
+**Zoom** goes from 1 to 16 times, or **Fit**. **Overlays** switch on a tile
+grid, the sprites' boxes, the scroll window, sprite 0, the beam and a heat tint
+for what was written lately.
+
+Point at a pixel to see it in **Pixel**: the tile or sprite, its palette and
+its addresses. Click to pin it, click again to let go. **Break on writes**
+stops the console when the CPU writes that nametable, CHR or palette byte, or
+the PPU register that changed there.
+
+**Registers** shows the PPU registers with how long ago each changed,
+**Colours** the palette and its use, **Lines** the screen bands where the scroll
+or control changed, **Timing** the frame and line length, and **Sprites** the
+OAM list.
+
+<!-- context: debugger/sound -->
+## Sound
+
+The 2A03's channels, read while the console is stopped: the two pulse channels,
+the triangle, the noise channel and the DMC, decoded into frequencies, volumes,
+length counters, envelopes and sweeps, and the frame counter's status.
+
+<!-- context: debugger/symbols -->
+## Symbols
+
+Every known symbol, the NES registers and the FujiNet mailbox, and the ones you
+loaded. **Filter** narrows the list, and activating a row goes to that address.
+**Load Symbols** reads ld65, ca65 and Mesen files; **Clear Symbols** forgets
+them. **Break at** sets an execute breakpoint on the selected symbol.
 
 <!-- context: debugger/fujinet -->
 ## FujiNet packets

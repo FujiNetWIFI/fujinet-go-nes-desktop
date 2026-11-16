@@ -125,12 +125,25 @@ set(NES_SESSION_C_SOURCES
 set(NES_SESSION_CXX_SOURCES
   src/session.cpp
   src/debug.cpp
+  src/expr.cpp
+  src/prompt.cpp
+  src/iostate.cpp
+  src/memtools.cpp
   src/fuji_trace.cpp)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/gamepad_sdl.c")
   list(APPEND NES_SESSION_C_SOURCES src/gamepad_sdl.c)
 else()
   set(NES_GAMEPAD_STUB ON)
 endif()
+
+# ---- VIDEO agent: the Video tab ------------------------------------------
+# ppumodel: the PPU's scroll registers replayed from a frame's register
+# accesses; ppuview: the Decoded sources; vidtab: the controller all four
+# frontends draw from; vidcap: the per-frame capture over MesenCE's event
+# manager (needs the frame tap in mesen/MesenHost.cpp).
+list(APPEND NES_SESSION_C_SOURCES src/ppumodel.c src/ppuview.c src/vidtab.c)
+list(APPEND NES_SESSION_CXX_SOURCES src/vidcap.cpp)
+# ---- end VIDEO agent -----------------------------------------------------
 
 add_library(nes_session STATIC
   ${NES_SESSION_C_SOURCES} ${NES_SESSION_CXX_SOURCES})

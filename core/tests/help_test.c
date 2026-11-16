@@ -27,12 +27,15 @@ static const char *const platform_names[] = { "GNOME", "KDE", "Windows", "macOS"
 /* What the frontends' Help buttons and menus open. */
 static const char *const contexts[] = {
     "main", "import-sd", "controllers", "fujilog", "prefs/Machine",
-    "debugger/prompt", "debugger/cpu", "debugger/disassembly", "debugger/ppu",
-    "debugger/apu", "debugger/breakpoints", "debugger/cart", "debugger/fujinet",
+    "debugger/console", "debugger/disassembly", "debugger/memory", "debugger/breakpoints",
+    "debugger/watches", "debugger/cart", "debugger/trace", "debugger/history", "debugger/video",
+    "debugger/sound", "debugger/symbols", "debugger/fujinet",
 };
 
 /* The prompt's commands (core/include/nesdebug.h). */
-static const char *const debug_commands[] = { "break", "bpr", "bpw", "print", "mem", "poke", "ppu", "label", "labels", "runto", "disasm", "cart" };
+static const char *const debug_commands[] = { "break", "bpr", "bpw", "bpa", "print", "regs", "set", "mem", "poke", "ppu", "find",
+                                              "watch", "unwatch", "trace", "label", "labels", "symbols", "runto", "disasm",
+                                              "map", "io", "cart", "sound", "video", "frame", "scanline" };
 
 /* The Preferences pages: what each one has, as the frontends label it. */
 static const struct {
@@ -201,7 +204,7 @@ static void
 check_debugger(int p)
 {
     int t, b;
-    CHECK(neshelp_find("debugger/prompt", &t, &b) == 0, "no debugger/prompt");
+    CHECK(neshelp_find("debugger/console", &t, &b) == 0, "no debugger/console");
     const neshelp_topic *tp = neshelp_topic_at(t);
     int end = neshelp_section_end(t, b);
     for (size_t k = 0; k < sizeof debug_commands / sizeof *debug_commands; k++) {
@@ -220,12 +223,15 @@ check_debugger(int p)
             }
         }
         if (!found) {
-            fprintf(stderr, "MISSING (%s) debugger/prompt: command `%s`\n", platform_names[p], cmd);
+            fprintf(stderr, "MISSING (%s) debugger/console: command `%s`\n", platform_names[p], cmd);
             misses++;
         }
     }
-    /* the eight tabs */
-    require(p, "debugger", "tabs", "eight tabs");
+    /* the twelve tabs, and the Video tab's words */
+    require(p, "debugger", "tabs", "twelve tabs");
+    static const char *const words[] = { "Pop Out", "Run to Cursor", "Record", "Poke", "Display", "Decoded", "Beam", "Values", "Zoom", "Fit", "Overlays", "Pixel", "Registers", "Colours", "Lines", "Timing", "Break on writes" };
+    for (size_t k = 0; k < sizeof words / sizeof *words; k++)
+        require(p, "debugger", "button", words[k]);
 }
 
 int

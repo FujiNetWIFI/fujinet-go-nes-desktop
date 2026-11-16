@@ -101,6 +101,14 @@ public:
 	// SetFrameCallback(nullptr, nullptr) waits for a call in flight.
 	typedef void (*FrameCallback)(void* ctx);
 	void SetFrameCallback(FrameCallback cb, void* ctx);
+
+	// The Video tab's frame tap (vidcap.cpp): told on the video decoder's
+	// thread of EVERY frame handed to the renderer -- a repeat of the last
+	// one too -- with the PPU's frame number (0xFFFFFFFF when unknown, as
+	// for a cleared screen). Keep it quick, do not call back into the host;
+	// SetFrameTap(nullptr, nullptr) waits for a call in flight.
+	typedef void (*FrameTap)(void* ctx, const uint32_t* argb, uint32_t width, uint32_t height, uint32_t frameNumber);
+	void SetFrameTap(FrameTap tap, void* ctx);
 	// Frames the machine has run, including ones identical to their predecessor.
 	uint64_t GetFrameCount() { return _frameCount.load(); }
 
@@ -136,7 +144,7 @@ public:
 	std::string GetLog();
 
 	// ---- called from the host classes ----
-	void PublishFrame(const uint32_t* argb, uint32_t width, uint32_t height);
+	void PublishFrame(const uint32_t* argb, uint32_t width, uint32_t height, uint32_t frameNumber = 0xFFFFFFFFu);
 	void PushAudio(const int16_t* samples, uint32_t frames);
 	void AudioLatency(uint32_t& readPos, uint32_t& writePos, uint32_t& bufferBytes);
 	void OnFrameDone();
@@ -166,6 +174,9 @@ private:
 	std::mutex _cbLock;
 	FrameCallback _frameCb = nullptr;
 	void* _frameCbCtx = nullptr;
+	std::mutex _tapLock;
+	FrameTap _frameTap = nullptr;
+	void* _frameTapCtx = nullptr;
 
 	// ---- vsync phase lock ----
 	std::mutex _vsyncLock;
