@@ -28,6 +28,14 @@
 #include "Shared/Video/VideoRenderer.h"
 #include "Debugger/DebugTypes.h"
 #include "NES/Mappers/Homebrew/FujiNetCart.h"
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
 #include "Shared/BaseControlManager.h"
 #include "Shared/BaseControlDevice.h"
 #include "Shared/Interfaces/IConsole.h"
@@ -583,8 +591,42 @@ void MesenHost::NotifyVsync(int64_t)
 // frontend's frame clock only when that clock runs at the console's own rate
 // (within 5%): a 144 Hz display must not make the NES run at 144 fps, and a
 // 50 Hz PAL game on a 60 Hz display stays on Mesen's own wall-clock pacing.
+#if defined(__APPLE__)
+// macOS paces the way a game does: the emulation thread asks the scheduler for
+// a real-time slot (THREAD_TIME_CONSTRAINT_POLICY) -- one frame period, a few
+// milliseconds of work, preemptible -- so a busy desktop or a power-saving core
+// does not make a frame late. QOS_CLASS_USER_INTERACTIVE is the fallback if the
+// kernel refuses. Mesen creates the thread; its first frame is where we can
+// reach it.
+static void AppleRealtimeThread(double frameNs)
+{
+	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
+	mach_timebase_info_data_t tb;
+	mach_timebase_info(&tb);
+	auto toMach = [&](double ns) { return (uint32_t)(ns * tb.denom / tb.numer); };
+
+	thread_time_constraint_policy_data_t p;
+	p.period = toMach(frameNs);
+	p.computation = toMach(5000000.0);   // ~5 ms of work
+	p.constraint = toMach(frameNs);
+	p.preemptible = 1;
+	mach_port_t self = mach_thread_self();
+	thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p,
+	                  THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+	mach_port_deallocate(mach_task_self(), self);
+}
+#endif
+
 void MesenHost::OnFrameDone()
 {
+#if defined(__APPLE__)
+	thread_local bool realtime = false;
+	if(!realtime) {
+		realtime = true;
+		AppleRealtimeThread(1e9 / (_emu ? _emu->GetFps() : 60.0988));
+	}
+#endif
 	std::unique_lock<std::mutex> lock(_vsyncLock);
 	int64_t now = MonoNs();
 	if(!_vsyncLastNs || now - _vsyncLastNs > VsyncRecentNs || !_vsyncPeriodNs) {
