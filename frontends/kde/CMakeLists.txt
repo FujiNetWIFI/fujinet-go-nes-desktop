@@ -28,6 +28,7 @@ add_executable(fujinet-go-nes-kde
   help/HelpWindow.cpp
   controllers/ControllersWindow.cpp
   debugger/DebuggerWindow.cpp
+  debugger/VideoTab.cpp
 )
 target_link_libraries(fujinet-go-nes-kde PRIVATE nes_session Qt6::Widgets Qt6::GuiPrivate)
 # The display's shaders, baked for every backend and embedded as resources.
@@ -62,4 +63,27 @@ if(APPSTREAMCLI)
   add_test(NAME metainfo_kde
            COMMAND ${APPSTREAMCLI} validate --no-net --pedantic
                    ${CMAKE_CURRENT_BINARY_DIR}/online.fujinet.go.nes.kde.metainfo.xml)
+endif()
+
+# The Debugger window (and F12 from the main window), on the offscreen
+# platform, against a running session whose cartridge is a hand-assembled
+# loop (core/tests/test_engine_rom.h): needs no ROM file.
+find_package(Qt6 COMPONENTS Test QUIET)
+if(Qt6Test_FOUND)
+  add_executable(debugger_test debugger_test.cpp FujiNetWindows.cpp
+                 debugger/DebuggerWindow.cpp debugger/VideoTab.cpp MainWindow.cpp DisplayWidget.cpp
+                 SoftDisplayWidget.cpp FrameFeed.cpp SettingsDialog.cpp KeyForward.cpp
+                 controllers/ControllersWindow.cpp help/HelpWindow.cpp)
+  target_link_libraries(debugger_test PRIVATE nes_session Qt6::Widgets Qt6::GuiPrivate Qt6::Test)
+  qt_add_shaders(debugger_test "display_shaders_test"
+    PREFIX "/"
+    FILES shaders/display.vert shaders/display.frag)
+  target_include_directories(debugger_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                             "${CMAKE_SOURCE_DIR}/core/tests")
+  target_compile_definitions(debugger_test PRIVATE
+    NES_SOURCE_ICON_DIR="${CMAKE_SOURCE_DIR}/data/icons")
+  target_compile_options(debugger_test PRIVATE -Wall -Wextra)
+  add_test(NAME debugger_kde COMMAND debugger_test)
+  set_tests_properties(debugger_kde PROPERTIES
+                       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
