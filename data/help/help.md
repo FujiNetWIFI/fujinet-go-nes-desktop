@@ -430,8 +430,9 @@ breakpoint's condition is such an expression; on a read or write it can use
 ## Disassembly
 
 The 6502 disassembled at the PC, with the opcode bytes, labels and the
-breakpoints in the margin (red when on, grey when off). Click a line to toggle
-its breakpoint, or press <kbd>F9</kbd>. **Follow PC** keeps the current line in
+breakpoints in the margin (red when on, grey when off). Click a line to select
+it; click its margin, double-click it, or press <kbd>F9</kbd> to toggle its
+breakpoint. **Follow PC** keeps the current line in
 view. Symbols load from ld65 (`-Ln` or VICE), ca65 `.dbg` and Mesen `.mlb`
 files; the NES registers and the FujiNet mailbox are labelled out of the box.
 
@@ -439,7 +440,7 @@ files; the NES registers and the FujiNet mailbox are labelled out of the box.
 ## Memory
 
 A hex view of a memory space: the CPU's 64K as it sees it, or the PPU bus, OAM,
-palette, PRG, CHR or WRAM. Type an address or a label after **Address:** and
+palette, PRG, CHR or WRAM. Type an address or a label in the address box and
 press Enter. **Poke** writes a byte while the console is stopped. **Search**
 finds hex bytes or text, and **Find Next** and **Find Previous** step through
 the matches. Rows are named by region (RAM, PPU registers, the PRG window and
