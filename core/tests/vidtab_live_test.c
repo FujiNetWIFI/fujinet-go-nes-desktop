@@ -156,6 +156,15 @@ int main(void)
     nesvid_tab_register_console(dbg);
     nesdebug_attach(dbg);
     check(wait_stopped(dbg, 1, 3000), "attaching stops the machine");
+    /* parked at boot, rendering still off: the address stands still, which is no scroll split */
+    for (int item = 0; item < 5; item++) {
+        const nesvid_band *bands;
+        int count;
+        sleep_ms(20);
+        nesvid_tab_refresh(tab, 1);
+        count = nesvid_tab_lines(tab, &bands);
+        check(count == 1 && bands[0].first == 0 && bands[0].last == 239, "one band for the whole picture while the PPU is still off");
+    }
     nesdebug_resume(dbg);
     check(wait_stopped(dbg, 0, 1000), "and resume runs it");
     sleep_ms(600);          /* past the first frames: the split starts with the second NMI */
@@ -386,6 +395,27 @@ int main(void)
         }
         nesdebug_breakpoint_clear(dbg);
         nesvid_tab_unpin(tab);
+    }
+
+    /* the Lines table at every kind of stop: the split is one band edge wherever the beam is */
+    {
+        static const int stops[] = { 5, 40, 91, 92, 100, 200, 239, 245, 261 };
+        for (size_t item = 0; item < sizeof stops / sizeof stops[0]; item++) {
+            const nesvid_band *bands;
+            int steps, count;
+            nesvid_capture now;
+            nesvid_host_capture_fill(session, &now);
+            steps = (stops[item] - now.beam_line + 262) % 262;
+            if (steps == 0) steps = 262;
+            nesdebug_scanline(dbg, steps);
+            sleep_ms(30);
+            wait_stopped(dbg, 1, 3000);
+            nesvid_tab_refresh(tab, 1);
+            count = nesvid_tab_lines(tab, &bands);
+            printf("   (stop at line %d: %d bands)\n", stops[item], count);
+            check(count >= 1 && count <= 2, "the Lines table never invents bands at a stop");
+            if (count > 2) for (int row = 0; row < count && row < 4; row++) printf("   (%s)\n", bands[row].text);
+        }
     }
 
     /* a write breakpoint on PPUSCROLL stops the machine in the NMI handler */

@@ -2347,7 +2347,6 @@ extern "C" int nesdebug_memory_map(nesdebug* d, nesdebug_region* out, int max)
     e.low = low; e.high = high; e.readable = r; e.writable = w; e.bank = bank;
     snprintf(e.name, sizeof e.name, "%s", name.c_str());
   };
-  (void)d;
   add(0x0000, 0x07FF, 1, 1, -1, "Console RAM (2K)");
   add(0x0800, 0x1FFF, 1, 1, -1, "Console RAM mirrors");
   add(0x2000, 0x2007, 1, 1, -1, "PPU registers");
@@ -2374,9 +2373,18 @@ extern "C" int nesdebug_memory_map(nesdebug* d, nesdebug_region* out, int max)
     for(int i = 0; i < 4; i++)
     {
       const uint16_t low = (uint16_t)(0x8000 + i * 0x2000);
-      const int bank = cart ? st.PrgSlot[i] : -1;
+      // The bank the CPU would read now: the debugger's own view of the mapping. The cartridge's
+      // published status is one frame old, and while the loader runs the $8000 window follows the
+      // image slice by slice, so two reads of the status could name different banks.
+      int bank = cart ? st.PrgSlot[i] : -1;
+      const int live = with_dbg(d, -2, [&](Debugger* dbg) {
+        const AddressInfo abs = dbg->GetAbsoluteAddress(cpu_addr(low));
+        return (abs.Address >= 0 && abs.Type == MemoryType::NesPrgRom) ? (abs.Address >> 13) : -1;
+      });
+      if(live != -2) bank = live;
       add(low, (uint16_t)(low + 0x1FFF), 1, 0, bank,
-          "PRG window $" + hex(low, 4) + (bank >= 0 ? " (bank " + std::to_string(bank) + ")" : ""));
+          "PRG window $" + hex(low, 4) + (bank >= 0 ? " (bank " + std::to_string(bank) + ")" : "") +
+          (cart && st.Loading ? " (loader)" : ""));
     }
   }
   else

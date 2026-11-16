@@ -285,7 +285,11 @@ static void compute_bands(nesvid_tab *tab)
             nesvid_line_scroll(before, &prevx, &prevy);
             if ((cur->ctrl ^ before->ctrl) & 0xFC) changed |= CH_CTRL;
             if (cur->mask != before->mask) changed |= CH_MASK;
-            if (posx != prevx || posy != (prevy + 1) % 480) changed |= CH_SCROLL;
+            /* The scroll moves a line down by itself only while the PPU is drawing: with
+             * rendering off the address stands still, and a line the log does not reach
+             * carries the registers as they stand, so neither says a scroll write split the frame. */
+            const int drawing = cur->valid && before->valid && (cur->mask & 0x18) && (before->mask & 0x18);
+            if (drawing && (posx != prevx || posy != (prevy + 1) % 480)) changed |= CH_SCROLL;
             breaks = changed != 0;
             if (breaks && tab->nbands < MAX_BANDS) {
                 band_rec *band = &tab->bands[tab->nbands++];

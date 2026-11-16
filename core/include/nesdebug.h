@@ -165,7 +165,9 @@ typedef struct {
 } nesdebug_line;
 /* Up to `max` lines starting at the row that holds `addr`. Returns the
  * count; *pc_line is the index of the PC's line in `out`, -1 when not
- * among them. */
+ * among them. Mesen lists only memory that exists (RAM, PRG, WRAM, the
+ * loader): from an address with nothing behind it ($2000-$4FFF) the first
+ * line is the next backed one, so out[0].address can be above `addr`. */
 int  nesdebug_disassemble(nesdebug *d, uint16_t addr, nesdebug_line *out,
                           int max, int *pc_line);
 /* The address `rows` disassembly rows before (negative) or after `addr` --

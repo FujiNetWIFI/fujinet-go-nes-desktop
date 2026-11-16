@@ -393,9 +393,46 @@ static void engine_tests(nessession *s, nessession_start_opts *o, const char *wr
         check(prg == 4, "engine: four PRG windows with bank numbers");
         check(map[0].readable && map[0].writable && strstr(map[0].name, "RAM"), "engine: RAM first");
         {
+            /* the bank numbers are the debugger's live mapping: the same at every read of a parked machine,
+             * and the name carries the number the field holds */
+            nesdebug_region again[24];
+            int same = 1, named = 1;
+            for (int round = 0; round < 20; round++) {
+                const int count = nesdebug_memory_map(d, again, 24);
+                if (count != n) { same = 0; break; }
+                for (i = 0; i < n; i++) {
+                    char want[16];
+                    if (again[i].bank != map[i].bank) same = 0;
+                    if (again[i].bank >= 0) {
+                        snprintf(want, sizeof want, "(bank %d)", again[i].bank);
+                        if (!strstr(again[i].name, want)) named = 0;
+                    }
+                }
+                sleep_ms(2);
+            }
+            check(same, "engine: the PRG window banks are the same at every read while parked");
+            check(named, "engine: and each window's name carries its bank number");
+        }
+        {
             char name[80];
             check(nesmem_region_name(map, n, 0x2002, name, sizeof name) > 0 && strstr(name, "PPU"), "engine: region_name finds $2002");
         }
+    }
+
+    /* ---- disassembly from an address nothing backs (Mesen lists only memory: RAM, PRG, WRAM, the loader) ---- */
+    {
+        static const uint16_t unbacked[] = { 0x2006, 0x4016, 0x4020, 0x4FFF };
+        nesdebug_line rows[4];
+        int got, ok = 1;
+        for (i = 0; i < (int)(sizeof unbacked / sizeof unbacked[0]); i++) {
+            got = nesdebug_disassemble(d, unbacked[i], rows, 4, NULL);
+            if (got < 1 || rows[0].address <= unbacked[i] || nesdebug_row_address(d, unbacked[i], 0) != unbacked[i]) ok = 0;
+        }
+        check(ok, "engine: from an address with no memory behind it the listing starts at the next backed row (Mesen's own)");
+        got = nesdebug_disassemble(d, 0x0100, rows, 4, NULL);
+        check(got >= 1 && rows[0].address == 0x0100, "engine: from RAM the first row is the address asked for");
+        got = nesdebug_disassemble(d, 0xC000, rows, 4, NULL);
+        check(got >= 1 && rows[0].address <= 0xC000, "engine: from PRG the first row holds the address asked for");
     }
 
     /* ---- search over the spaces ---- */
