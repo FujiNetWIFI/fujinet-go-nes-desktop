@@ -25,6 +25,7 @@ add_executable(fujinet-go-nes-macos MACOSX_BUNDLE
   help/HelpWindow.m
   controllers/ControllersWindow.m
   debugger/DebuggerWindow.m
+  debugger/VideoTab.m
   "${NES_ICNS}"
 )
 set_source_files_properties("${NES_ICNS}" PROPERTIES
