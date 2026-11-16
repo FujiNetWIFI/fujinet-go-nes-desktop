@@ -40,10 +40,11 @@ const char *nes_icon_name(void)
     return name;
 }
 
-/* The controllers, debugger and log windows are hidden rather than destroyed
- * and belong to the application (so the shell groups them with it), which
- * means the application would outlive its main window. Closing the main
- * window is quitting. */
+/* The controllers and log windows are hidden rather than destroyed (the
+ * debugger is destroyed when closed, which detaches its engine) and belong
+ * to the application (so the shell groups them with it), which means the
+ * application would outlive its main window. Closing the main window is
+ * quitting. */
 static gboolean on_main_close(GtkWindow *win, gpointer user_data)
 {
     (void)win;
