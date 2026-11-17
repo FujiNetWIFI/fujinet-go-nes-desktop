@@ -72,6 +72,13 @@
     <release version="@PROJECT_VERSION@" date="2026-11-16">
       <description>
         <p>
+          macOS: the picture is drawn with Metal in step with the display, so it is smoother on 60 and 120 Hz screens; the emulator runs with game-grade scheduling priority; and the app opts into macOS Game Mode when it is full screen.
+        </p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-11-16">
+      <description>
+        <p>
           A twelve-tab debugger: Console, Disassembly, Memory, Breakpoints, Watches, Cart &amp; I/O, Trace, History, Video, Sound, Symbols and FujiNet, with editable registers under every tab and Pop Out. Expressions and conditions on every breakpoint (value and old on writes), read, write and access breakpoints on the CPU and PPU buses, an instruction trace and history, a Video tab with the display, nametables, patterns, sprites, the beam and per-line scroll bands, and the APU channels decoded.
         </p>
       </description>
