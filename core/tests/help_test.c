@@ -265,6 +265,23 @@ main(void)
         check_debugger(p);
     }
 
+    /* The Controllers window's help counts the targets and names the new
+     * settings. */
+    {
+        char want[64], text[16384];
+        int topic, block;
+        snprintf(want, sizeof want, "%d in all", NES_TARGET_COUNT);
+        CHECK(NES_TARGET_COUNT == 23, "23 targets");
+        CHECK(neshelp_find("changing-the-controls", &topic, &block) == 0, "changing-the-controls");
+        for (int p = 0; p < 4; p++) {
+            neshelp_plain_text(platforms[p], topic, block, text, sizeof text);
+            CHECK(strstr(text, want) != NULL, "\"%s\" in Changing the controls", want);
+            require(p, "preferences", "setting", "pad_assign");
+            require(p, "preferences", "setting", "controllers_show_bindings");
+        }
+        CHECK(misses == 0, "%d missing from data/help/help.md", misses);
+    }
+
     /* lookup and search */
     CHECK(neshelp_find("#preferences", &t, &b) == 0 && b == -1, "#preferences");
     CHECK(neshelp_find("#the-settings-file", &t, &b) == 0 && b >= 0, "#the-settings-file");

@@ -60,9 +60,11 @@ desktop app. A member of the FujiNet Go desktop family
   runs is assigned to the next free player within a second, unplugging
   releases it, and a pad that comes back gets its player back; each event is
   shown in the window. Pads with no gamepad mapping fall back to raw buttons
-  and hats. The **Controllers** window shows both NES controllers live,
-  presses buttons with the mouse, and rebinds any control to a key or
-  gamepad button (Map).
+  and hats. The **Controllers** window draws both NES controllers (and the
+  console's RESET key) as they look, presses buttons with the mouse, drags
+  the D-pad, and rebinds any control to a key or gamepad button (Map, Clear,
+  Defaults, Show bindings). A pad's player is remembered across runs, and
+  letting go of a key never drops a button a pad or the mouse still holds.
 - **Keyboards on the expansion port.** Preferences / Settings → Expansion
   port: the **Family BASIC Keyboard** (HVC-007) or the **Subor** keyboard,
   emulated by MesenCE and switched live. While one is attached the host
@@ -71,8 +73,8 @@ desktop app. A member of the FujiNet Go desktop family
   everywhere) hands the keys back to the controllers. Keys map by position
   (Shift is passed through, so typed symbols follow the NES keycaps); Home is
   CLR HOME, End is STOP, Left/Right Alt are GRPH/KANA. Gamepads keep driving
-  the controllers either way, and the Controllers window has an on-screen
-  keyboard to click. With the Family BASIC keyboard comes its **Data
+  the controllers either way, and the Controllers window draws the attached keyboard (Family BASIC
+  in its red and grey caps, or Subor) to click. With the Family BASIC keyboard comes its **Data
   Recorder**: Machine ▸ Data Recorder ▸ Play / Record / Stop (`.fbt` files,
   in `tapes/` under the data directory). CONFIG detects either keyboard
   and takes typed input in its text editor (RETURN accepts, ESC cancels);

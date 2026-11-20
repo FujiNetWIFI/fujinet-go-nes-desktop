@@ -174,7 +174,8 @@ Key combinations with the Super (Windows) key are the desktop's.
 Gamepads are picked up as they are plugged in, and can come and go at any
 time. A pad plugged in while a game runs is assigned to the next free player
 within a second, unplugging releases it, and a pad that comes back gets its
-player back; each event is shown in the window. A pad with no standard layout
+player back, also after the next start (the assignment is kept in the setting
+`pad_assign`); each event is shown in the window. A pad with no standard layout
 (a plain USB adapter) uses its raw buttons and hats. With **Left stick drives
 the D-pad** on, the left stick does too.
 
@@ -193,28 +194,40 @@ Controllers window then draws the keyboard.
 
 The controls are changed in the Controllers window (<kbd>F9</kbd>): click
 **Map**, then click a control, then press the key or the gamepad button to give
-it. The control's old key or button is taken from it. **Defaults** puts every
-control back. The map is kept in the settings, and only what differs from the
-defaults is written.
+it. The control's old key or button is taken from it. **Clear** unbinds the
+control you picked, and **Defaults** puts every control back; there are 23 in
+all (ten per controller, the console's RESET, and the two actions Reset to
+CONFIG and Stop in debugger). **Show bindings** writes each control's key on
+the picture (setting `controllers_show_bindings`). <kbd>F9</kbd>, <kbd>F11</kbd>
+and <kbd>F12</kbd> belong to the app and cannot be given to a control. The map
+is kept in the settings, and only what differs from the defaults is written.
 
 <!-- context: controllers -->
 # Controllers window
 
-The Controllers window (<kbd>F9</kbd>) shows both NES controllers live and
-presses their buttons with the mouse, and draws the expansion keyboard when
-one is attached. It floats on its own at a fixed size. The controls that are
-held light up in the accent colour, whoever holds them: the keyboard, a gamepad
-or the mouse.
+The Controllers window (<kbd>F9</kbd>) draws both NES controllers as they look,
+grey with the black D-pad and the two red buttons, and the console's RESET key.
+Press them with the mouse. The turbo buttons, small extras above B and A that
+the real pad lacks, repeat the button while held. It also draws the expansion
+keyboard (Family BASIC or Subor) when one is attached. It floats on its own at a
+fixed size and is hidden when the app starts. The controls that are held light
+up, whoever holds them: the keyboard, a gamepad or the mouse.
 
 | With the mouse | Does |
 |---|---|
 | Press a button | Holds it for as long as the button is down |
-| Press a key | Holds it |
+| Press and drag on the D-pad | Holds the direction under the pointer, diagonals included |
+| Press RESET | Resets the game |
+| Press a keyboard key | Holds it |
 
-The console samples its controls once a frame, so a button is *held*, not
-pulsed. Switching to another window lets go of everything the mouse holds. Keys
-typed in the Controllers window go to the console. **Map** and **Defaults**
-change the controls (see [Changing the controls](#changing-the-controls)).
+Each controller has a port type (*NES Controller* or *None*, drawn as an empty
+socket) and a row to choose which gamepad drives it (*Automatic*, *Player 1* or
+*Player 2*). **Reset to CONFIG** and **Stop in debugger** are buttons under the
+picture. The console samples its controls once a frame, so a button is *held*,
+not pulsed. Switching to another window lets go of everything the mouse holds,
+and letting go of a key does not let go of a button a gamepad still holds. Keys
+typed in the Controllers window go to the console. **Map**, **Clear**,
+**Defaults** and **Show bindings** change the controls (see [Changing the controls](#changing-the-controls)).
 
 # Machines
 
@@ -351,7 +364,10 @@ On Windows this window is called **Settings** (in the Machine menu).
 
 **Gamepads** lists each one plugged in, and which player it drives. A new
 gamepad drives Player 1, the next Player 2; choose *Player 1* or *Player 2* to
-fix it, or *Automatic*. The keys and buttons are changed in the Controllers
+fix it, or *Automatic*; the choice is remembered for that pad (setting
+`pad_assign`). **Reset Controls** puts every key and button back, and **Open
+Controllers** shows the Controllers window. **Show bindings** in that window is
+remembered too (setting `controllers_show_bindings`). The keys and buttons are changed in the Controllers
 window (see [Changing the controls](#changing-the-controls)).
 
 ## Audio settings
