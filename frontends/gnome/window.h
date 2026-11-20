@@ -16,6 +16,9 @@ GtkWidget *nes_window_new(AdwApplication *app, nessession *session);
 /* main.c: the icon name to use (the installed id, or the in-tree art). */
 const char *nes_icon_name(void);
 void nes_window_toast(NESWindow *self, const char *text);
+/* Runs a system action (NES_SYSACT_*) the way the main window's keys do:
+ * Reset to CONFIG with its toast, Stop in debugger opening the debugger. */
+void nes_window_run_sysaction(NESWindow *self, int sysact);
 
 /* The Help context the main window shows now: "main", or "prefs/Machine"
  * while Preferences is open. */

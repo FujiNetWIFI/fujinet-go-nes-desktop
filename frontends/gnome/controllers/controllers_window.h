@@ -17,4 +17,8 @@
 void nes_controllers_window_toggle(GtkWindow *parent, nessession *session);
 /* Shows the window on its Keyboard page (the expansion-port keyboard). */
 void nes_controllers_window_show_keyboard(GtkWindow *parent, nessession *session);
+/* Shows the window on its Controllers page. */
+void nes_controllers_window_show(GtkWindow *parent, nessession *session);
 gboolean nes_controllers_window_is_visible(void);
+/* Bindings changed outside the window (Preferences' Reset Controls): redraw. */
+void nes_controllers_window_refresh(void);

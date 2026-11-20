@@ -104,6 +104,11 @@ static void run_sysaction(NESWindow *self, int sa)
     }
 }
 
+void nes_window_run_sysaction(NESWindow *self, int sysact)
+{
+    run_sysaction(self, sysact);
+}
+
 /* The Ctrl shortcuts that stay the window's while the keyboard captures
  * (both NES keyboards have a CTR key, so Ctrl+letter otherwise types). */
 static gboolean is_accelerator(guint keyval, GdkModifierType state)
@@ -239,7 +244,9 @@ static void on_focus_leave(GtkEventControllerFocus *ctrl, gpointer user_data)
 {
     NESWindow *self = user_data;
     (void)ctrl;
-    nessession_release_all(self->session);
+    /* keys only: a button held with the mouse in the Controllers window, and
+     * the pads, are not this window's to let go of */
+    nessession_release_keyboard(self->session);
     memset(self->sysact_down, 0, sizeof self->sysact_down);
 }
 

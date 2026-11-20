@@ -16,6 +16,7 @@
 
 #include "window.h"
 #include "help/help_window.h"
+#include "controllers/controllers_window.h"
 
 typedef struct {
     NESWindow *window;
@@ -117,6 +118,38 @@ static void switch_changed(GObject *row, GParamSpec *pspec, gpointer user_data)
         analog_changed(row, NULL, b->state);
     else
         b->state->dirty = TRUE;
+}
+
+/* ---- controls: open the window, put every binding back ------------------- */
+
+static void open_controllers_clicked(GtkButton *button, gpointer user_data)
+{
+    PrefsState *state = user_data;
+    (void)button;
+    nes_controllers_window_show(GTK_WINDOW(state->window), state->session);
+}
+
+static void reset_controls_clicked(GtkButton *button, gpointer user_data)
+{
+    PrefsState *state = user_data;
+    (void)button;
+    nessession_bindings_reset(state->session);
+    nes_controllers_window_refresh();
+    nes_window_toast(state->window, "Controls back to the defaults");
+}
+
+static GtkWidget *button_row(PrefsState *state, const char *title, const char *subtitle,
+                             const char *label, GCallback callback)
+{
+    GtkWidget *row = adw_action_row_new();
+    GtkWidget *button = gtk_button_new_with_label(label);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(row), subtitle);
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    g_signal_connect(button, "clicked", callback, state);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(row), button);
+    adw_action_row_set_activatable_widget(ADW_ACTION_ROW(row), button);
+    return row;
 }
 
 static void volume_changed(GtkRange *range, gpointer user_data)
@@ -272,6 +305,7 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
     AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
     AdwPreferencesGroup *machine = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     AdwPreferencesGroup *ports = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    AdwPreferencesGroup *controls = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     AdwPreferencesGroup *analog = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     AdwPreferencesGroup *pads = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     AdwPreferencesGroup *audio = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
@@ -315,6 +349,16 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
                   "keyboard", NES_KBD_NONE, nes_keyboard_name, -5));
     update_port_subtitle(state, 0);
     update_port_subtitle(state, 1);
+
+    adw_preferences_group_set_title(controls, "Controls");
+    adw_preferences_group_set_description(controls,
+        "Keys and gamepad buttons are changed in the Controllers window (F9)");
+    adw_preferences_group_add(controls,
+        button_row(state, "Controllers window", "Pads, console RESET, Map and the keyboard",
+                   "Open", G_CALLBACK(open_controllers_clicked)));
+    adw_preferences_group_add(controls,
+        button_row(state, "Reset Controls", "Every key and gamepad button back to its default",
+                   "Reset", G_CALLBACK(reset_controls_clicked)));
 
     adw_preferences_group_set_title(analog, "Analog sticks");
     adw_preferences_group_add(analog,
@@ -370,6 +414,7 @@ void nes_prefs_show(NESWindow *parent, nessession *session,
 
     adw_preferences_page_add(page, machine);
     adw_preferences_page_add(page, ports);
+    adw_preferences_page_add(page, controls);
     adw_preferences_page_add(page, analog);
     adw_preferences_page_add(page, pads);
     adw_preferences_page_add(page, audio);
