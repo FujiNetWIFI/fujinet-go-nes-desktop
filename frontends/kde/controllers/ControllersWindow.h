@@ -1,111 +1,81 @@
 /*
- * The Controllers window: both NES controllers on screen (they press the
- * machine's buttons and light up with whatever the keyboard, a gamepad or
- * the mouse is holding), the console's RESET and Reset to CONFIG, each
- * port's controller type and gamepad assignment, and Map mode for rebinding
- * any control to a key or a gamepad button. A second tab carries the
- * expansion port: the attached keyboard drawn from the core's layout,
- * clickable, its held keys lit.
+ * The Controllers window (F9): both NES controllers drawn as what is plugged
+ * in (an NES-001 pad or an empty socket) over the console's front strip
+ * (RESET), from nessession_controls_layout; each port's type, the gamepads
+ * with their assignments, and Map mode for rebinding. A second tab carries
+ * the expansion port: the attached keyboard (Family BASIC or Subor) drawn
+ * from nessession_keyboard_skin_layout, clickable, its held keys lit. Hidden
+ * at start; a fixed-size floating window.
+ *
+ * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #pragma once
 
 #include <QComboBox>
-#include <QFormLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <QWidget>
 #include <vector>
 
 #include "nessession.h"
 
-/* A button that reports press and release, not "clicked": a controller
- * button is HELD, since the machine samples it once per frame. */
-class PadButton : public QPushButton {
-    Q_OBJECT
-public:
-    PadButton(const QString &face, int target, QWidget *parent = nullptr);
-    int target() const { return m_target; }
-    QString face() const { return m_face; }
-    void setHeld(bool held);
-signals:
-    void pressedTarget(int target);
-    void releasedTarget(int target);
-protected:
-    void mousePressEvent(QMouseEvent *e) override;
-    void mouseReleaseEvent(QMouseEvent *e) override;
-    void leaveEvent(QEvent *e) override;
-private:
-    int m_target;
-    QString m_face;
-    bool m_down = false;
-    bool m_held = false;
-};
-
-/* The expansion-port keyboard, drawn from nessession_keyboard_layout in key
- * units; a key is HELD while the mouse is down on it. */
-class KeyboardWidget : public QWidget {
-public:
-    explicit KeyboardWidget(nessession *session, QWidget *parent = nullptr);
-    void setType(int type);
-    QSize sizeHint() const override;
-protected:
-    void paintEvent(QPaintEvent *e) override;
-    void mousePressEvent(QMouseEvent *e) override;
-    void mouseReleaseEvent(QMouseEvent *e) override;
-private:
-    QRectF keyRect(int i) const;
-    void releaseMouse();
-    nessession *m_session;
-    int m_type = NES_KBD_NONE;
-    const nes_kbd_key *m_keys = nullptr;
-    int m_count = 0;
-    float m_cols = 0, m_rows = 0;
-    int m_mouseKey = -1;       /* the key index the mouse holds, or -1 */
-};
+class ControllersStage;
+class ControllersHint;
+class KeyboardStage;
 
 class ControllersWindow : public QWidget {
-    Q_OBJECT
 public:
     explicit ControllersWindow(nessession *session, QWidget *parent = nullptr);
+
+    /* Shows the window on the Keyboard tab and raises it. */
     void showKeyboard();
 
 protected:
-    void keyPressEvent(QKeyEvent *e) override;
-    void keyReleaseEvent(QKeyEvent *e) override;
-    void showEvent(QShowEvent *e) override;
-    void hideEvent(QHideEvent *e) override;
+    bool event(QEvent *evt) override;
+    void keyPressEvent(QKeyEvent *evt) override;
+    void keyReleaseEvent(QKeyEvent *evt) override;
+    void showEvent(QShowEvent *evt) override;
+    void hideEvent(QHideEvent *evt) override;
+    void changeEvent(QEvent *evt) override;
+    /* Tab is a key of the console's, not focus traversal. */
+    bool focusNextPrevChild(bool) override { return false; }
 
 private:
-    QWidget *buildController(int port);
-    QWidget *buildKeyboard();
-    PadButton *control(const QString &face, int target);
-    void onPressed(int target);
-    void onReleased(int target);
+    QWidget *buildKeyboardPage();
     void setMapState(int state);
-    void refreshLabels();
+    void bound(const QString &what, const QString &stolen);
     void pollCapture();
-    void poll();
+    void pollSlow();
+    void syncTypes();
     void rebuildPads();
+    void refreshPadPlayers();
+    void releaseEverything();
 
     nessession *m_session;
     QTabWidget *m_tabs = nullptr;
-    KeyboardWidget *m_keyboard = nullptr;
+    ControllersStage *m_stage = nullptr;
+    KeyboardStage *m_keyboard = nullptr;
     QComboBox *m_kbdType = nullptr;
     QLabel *m_kbdNote = nullptr;
-    std::vector<PadButton *> m_controls;
-    QPushButton *m_mapButton = nullptr;
-    QLabel *m_hint = nullptr;
-    QComboBox *m_type[2] = { nullptr, nullptr };
-    QFormLayout *m_padForm = nullptr;
+    QComboBox *m_type[2] = {};
+    QWidget *m_padArea = nullptr;
+    QVBoxLayout *m_padBox = nullptr;
     std::vector<QWidget *> m_padRows;
+    std::vector<QLabel *> m_padEff;       /* each pad's "plays Player N" */
     unsigned m_padGen = ~0u;
-    int m_mouseHeld = -1;      /* the target the mouse is holding, if any */
+    QPushButton *m_mapButton = nullptr;
+    QPushButton *m_clearButton = nullptr;
+    QPushButton *m_sysButton[NES_SYSACT_COUNT] = {};
+    ControllersHint *m_hint = nullptr;
     QTimer m_captureTimer;
-    QTimer m_pollTimer;
-    /* -2 idle, -1 armed and waiting for a target, >=0 waiting for a key or
-     * gamepad button. */
+    QTimer m_heldTimer;
+    QTimer m_slowTimer;
+    uint32_t m_swallow = 0;               /* the key Map took: its repeats and release too */
+    /* -2 idle, -1 armed and waiting for a target, >= 0 waiting for a key or
+     * gamepad button for that target. */
     int m_mapState = -2;
 };

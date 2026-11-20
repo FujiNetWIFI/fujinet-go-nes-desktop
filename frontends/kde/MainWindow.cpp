@@ -265,6 +265,14 @@ void MainWindow::restartSession()
     statusBar()->showMessage(QStringLiteral("Machine options applied (session restarted)"), 5000);
 }
 
+void MainWindow::showControllers()
+{
+    if (!m_controllers) m_controllers = new ControllersWindow(m_session, this);
+    m_controllers->show();
+    m_controllers->raise();
+    m_controllers->activateWindow();
+}
+
 void MainWindow::toggleControllers()
 {
     if (!m_controllers) m_controllers = new ControllersWindow(m_session, this);
@@ -456,7 +464,9 @@ bool MainWindow::event(QEvent *e)
 {
     if (captureKey(e)) return true;
     if (e->type() == QEvent::WindowDeactivate) {
-        nessession_release_all(m_session);
+        /* only the keyboard's holds: the Controllers window's pointer and the
+         * pads are not this window's to let go of */
+        nessession_release_keyboard(m_session);
         for (bool &d : m_sysactDown) d = false;
     }
     return QMainWindow::event(e);

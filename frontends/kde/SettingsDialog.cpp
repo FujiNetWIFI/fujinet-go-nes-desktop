@@ -12,9 +12,13 @@
 #include <QDialogButtonBox>
 #include <QShortcut>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMainWindow>
+#include <QPushButton>
+#include <QStatusBar>
 #include <QMessageBox>
 #include <QSlider>
 #include <QTimer>
@@ -98,6 +102,29 @@ bool SettingsDialog::run(QWidget *parent, nessession *session)
     QObject::connect(kbd, &QComboBox::currentIndexChanged, &dlg,
                      [=](int idx) { nessession_set_keyboard(session, idx); });
     pform->addRow(QStringLiteral("Expansion port"), kbd);
+    /* Keys, gamepad buttons and gamepad assignments: back to the defaults, or
+     * to the Controllers window to change them one by one */
+    auto *resetControls = new QPushButton(QStringLiteral("Reset Controls"));
+    resetControls->setToolTip(QStringLiteral("Put every key and gamepad button back to its default, "
+                                             "and every gamepad to Automatic"));
+    auto *resetNote = new QLabel;
+    resetNote->setStyleSheet(QStringLiteral("color: gray;"));
+    QObject::connect(resetControls, &QPushButton::clicked, &dlg, [=] {
+        nessession_bindings_reset(session);
+        for (int pad = 0, count = nessession_gamepad_count(session); pad < count; pad++)
+            nessession_gamepad_assign(session, pad, -1);
+        resetNote->setText(QStringLiteral("Controls reset to the defaults."));
+        if (auto *main = qobject_cast<QMainWindow *>(parent))
+            main->statusBar()->showMessage(QStringLiteral("Controls reset to the defaults"), 4000);
+    });
+    bool openControllers = false;
+    auto *openButton = new QPushButton(QStringLiteral("Open Controllers..."));
+    openButton->setToolTip(QStringLiteral("Close Preferences and show the Controllers window (F9)"));
+    auto *controlsRow = new QHBoxLayout;
+    controlsRow->addWidget(resetControls);
+    controlsRow->addWidget(openButton);
+    controlsRow->addWidget(resetNote, 1);
+    pform->addRow(controlsRow);
     outer->addWidget(ports);
 
     /* Gamepads: one row per pad, refreshed as they come and go */
@@ -184,14 +211,22 @@ bool SettingsDialog::run(QWidget *parent, nessession *session)
                                  QStringLiteral("\"%1\" is not an address:port. Example: "
                                                 "127.0.0.1:11506").arg(externalAddr->text()));
             externalAddr->setFocus();
+            openControllers = false;
             return;
         }
         dlg.accept();
     });
+    QObject::connect(openButton, &QPushButton::clicked, &dlg, [&] {
+        openControllers = true;
+        buttons->button(QDialogButtonBox::Ok)->click();
+    });
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     outer->addWidget(buttons);
 
-    if (dlg.exec() != QDialog::Accepted)
+    const bool accepted = dlg.exec() == QDialog::Accepted;
+    if (openControllers && accepted && parent)
+        QMetaObject::invokeMethod(parent, "showControllers", Qt::QueuedConnection);
+    if (!accepted)
         return false;
 
     bool changed = false;

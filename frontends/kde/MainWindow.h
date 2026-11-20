@@ -18,6 +18,8 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(nessession *session, QWidget *parent = nullptr);
+    /* Shows and raises the Controllers window (Preferences' Open Controllers). */
+    Q_INVOKABLE void showControllers();
 
 protected:
     void keyPressEvent(QKeyEvent *e) override;
