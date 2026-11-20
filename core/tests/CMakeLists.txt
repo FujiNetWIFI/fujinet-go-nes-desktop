@@ -60,6 +60,24 @@ add_executable(bindings_test bindings_test.c)
 target_link_libraries(bindings_test PRIVATE nes_session)
 add_test(NAME bindings COMMAND bindings_test)
 
+# The input sources' merge (key release keeps a pad's hold, opposed pairs
+# cancel, release_all / release_keyboard), no machine needed.
+add_executable(input_test input_test.c)
+target_link_libraries(input_test PRIVATE nes_session)
+target_include_directories(input_test PRIVATE "${CMAKE_SOURCE_DIR}/core/src")
+add_test(NAME input COMMAND input_test)
+
+# The Controllers window's layout, its hit tests and the keyboard skins, pure.
+add_executable(controls_test controls_test.c)
+target_link_libraries(controls_test PRIVATE nes_session)
+add_test(NAME controls COMMAND controls_test)
+
+# The remembered pad -> port table (settings key pad_assign), pure: no SDL, no
+# session.
+add_executable(pad_assign_test pad_assign_test.c ../src/pad_assign.c)
+target_include_directories(pad_assign_test PRIVATE "${CMAKE_SOURCE_DIR}/core/src")
+add_test(NAME pad_assign COMMAND pad_assign_test)
+
 # Where a dropped file goes.
 add_executable(media_test media_test.c)
 target_link_libraries(media_test PRIVATE nes_session)
@@ -106,6 +124,16 @@ add_executable(gamepad_test gamepad_test.c)
 target_link_libraries(gamepad_test PRIVATE nes_session)
 target_include_directories(gamepad_test PRIVATE "${CMAKE_SOURCE_DIR}/core/src")
 add_test(NAME gamepad COMMAND gamepad_test)
+
+# The gamepad layer end to end on an SDL virtual joystick: defaults, the
+# stick's hysteresis, sources not stepping on each other, map mode, two pads on
+# one port, hot-unplug releasing everything, a trigger bound to RESET (the pad
+# thread resets the machine), and pad_assign surviving a restart and a replug.
+# Waits up to 10 s for the pad; SKIPs (77) where SDL has no virtual joysticks.
+add_executable(gamepad_map_test gamepad_map_test.c)
+target_link_libraries(gamepad_map_test PRIVATE nes_session)
+add_test(NAME gamepad_map COMMAND gamepad_map_test)
+set_tests_properties(gamepad_map PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180 RUN_SERIAL ON)
 
 # The debugger contract: attach stops the machine, registers, step / over /
 # out, disassembly with the PC line, breakpoints that hit, memory, the PPU

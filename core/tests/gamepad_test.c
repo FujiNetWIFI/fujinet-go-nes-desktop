@@ -42,6 +42,15 @@ int main(void)
     assign[0] = 1; assign[1] = 1;
     check(nes_pad_for_port(assign, 2, 1) == 0 && nes_pad_for_port(assign, 2, 0) == -1, "two pads on one port: the first wins, the other port stays empty");
 
+    /* automatic pads take the ports no explicit pad claims */
+    assign[0] = 0; assign[1] = -1; assign[2] = -1;
+    check(nes_pad_for_port(assign, 2, 0) == 0 && nes_pad_for_port(assign, 2, 1) == 1, "explicit Player 1 + an automatic pad: it plays Player 2");
+    check(nes_pad_for_port(assign, 3, 1) == 1, "and with three pads the first automatic one still takes port 2");
+    assign[0] = 1; assign[1] = -1; assign[2] = -1;
+    check(nes_pad_for_port(assign, 3, 0) == 1 && nes_pad_for_port(assign, 3, 1) == 0, "explicit Player 2 + automatic pads: the first automatic takes port 1");
+    assign[0] = -1; assign[1] = 0; assign[2] = -1;
+    check(nes_pad_for_port(assign, 3, 1) == 0 && nes_pad_for_port(assign, 3, 0) == 1, "an explicit pad in the middle: the automatic ones fill around it");
+
     /* SDL button tables round-trip */
     {
         int b, ok = 1;

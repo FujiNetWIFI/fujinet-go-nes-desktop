@@ -46,14 +46,29 @@ static void set_locked(struct nessession *s, const char *key, const char *val)
 void settings_init(struct nessession *s)
 {
     FILE *fp;
-    char line[1024];
+    char *line = NULL;
+    size_t cap = 0;
 
     pthread_mutex_init(&s->settings_mtx, NULL);
     fp = fopen(s->settings_file, "r");
     if (!fp) return;
-    while (fgets(line, sizeof(line), fp)) {
-        char *eq, *end;
-        char *p = line;
+    for (;;) {
+        /* a whole line, however long: pad_assign can run to thousands of bytes */
+        size_t len = 0;
+        char *eq, *end, *p;
+        for (;;) {
+            if (cap - len < 256) {
+                char *grown = realloc(line, cap ? cap * 2 : 1024);
+                if (!grown) { free(line); fclose(fp); return; }
+                line = grown;
+                cap = cap ? cap * 2 : 1024;
+            }
+            if (!fgets(line + len, (int)(cap - len), fp)) break;
+            len += strlen(line + len);
+            if (len && line[len - 1] == '\n') break;
+        }
+        if (!len) break;
+        p = line;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#' || *p == '\n' || *p == '\0') continue;
         eq = strchr(p, '=');
@@ -63,6 +78,7 @@ void settings_init(struct nessession *s)
         *end = '\0';
         set_locked(s, p, eq + 1);
     }
+    free(line);
     fclose(fp);
     s->settings_dirty = 0;
 }

@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "nessession.h"
+#include "input_merge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +69,16 @@ struct nessession {
      * exactly what its press asserted even if the binding changed meanwhile */
     uint32_t held_keysym[NES_TARGET_COUNT];
 
+    /* the input sources (input_merge.h): who holds what, per port; the
+     * console sees their merge. input_mtx is a leaf lock -- never held while
+     * calling into the machine's reset or the settings store. */
+    pthread_mutex_t input_mtx;
+    uint16_t pad_src[2][NESSESSION_SRC_COUNT];   /* 1 << nes_action */
+    uint8_t  sw_src[NESSESSION_SRC_COUNT];       /* 1 << nes_switch (momentary) */
+    uint16_t fwd_pad[2];                         /* what the host was last told */
+    unsigned pad_gen_base;    /* the pad generation carries across a restart */
+    int pad_restarted;        /* the next gamepad thread's first scan is quiet */
+
     void *host;               /* MesenHost*, session.cpp only */
     void *audio;              /* audio_sdl.c state, NULL until started */
     void *gamepad;            /* gamepad_sdl.c state, NULL until started */
@@ -115,13 +126,17 @@ void audio_stop(struct nessession *s);
 /* gamepad_sdl.c */
 int  gamepad_start(struct nessession *s);
 void gamepad_stop(struct nessession *s);
-/* Called by the gamepad thread with the button/axis state it resolved. */
-void session_gamepad_apply(struct nessession *s, int port, int act, int down);
 /* session.cpp: keyboard mode's share of nessession_key. Returns 1 if the
  * key was the keyboard's (or Scroll Lock), 0 to leave it to the bindings. */
 int  session_keyboard_key(struct nessession *s, uint32_t keysym, int down);
 /* Release every keyboard key the host or the mouse holds. */
 void session_keyboard_release_all(struct nessession *s);
+/* Release only the keys the host keyboard holds (keyboard mode's typing), not
+ * the mouse's holds on the on-screen keyboard. */
+void session_keyboard_release_host(struct nessession *s);
+
+/* input.cpp: forget every input source's holds (start / stop). */
+void input_reset(struct nessession *s);
 
 /* Called by the gamepad thread on a connect/disconnect. */
 void session_gamepad_event(struct nessession *s, const char *text);

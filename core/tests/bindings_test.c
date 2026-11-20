@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "nessession.h"
 #include "test_tmpdir.h"
@@ -72,13 +73,61 @@ int main(void)
     check(nessession_keysym_from_win_scancode(0x48, 1) == NES_KEYSYM_UP, "Windows E0 48 -> Up");
     check(nessession_keysym_from_macos_keycode(0x7E) == NES_KEYSYM_UP, "macOS 0x7E -> Up");
 
+    /* Clear unbinds both the key and the pad button */
+    nessession_binding_clear(s, NES_TARGET_PORT(0, NES_ACT_B));
+    b = nessession_binding_get(s, NES_TARGET_PORT(0, NES_ACT_B));
+    check(b.keysym == 0 && b.button == NES_PAD_BTN_NONE, "clear unbinds the key and the pad button");
+    check(nessession_target_for_key(s, 'z') == -1 && nessession_target_for_button(s, 0, NES_PAD_BTN_SOUTH) == -1,
+          "and nothing answers to them");
+    nessession_binding_clear(s, -1);
+    nessession_binding_clear(s, NES_TARGET_COUNT);
+    check(nessession_binding_get(s, NES_TARGET_PORT(1, NES_ACT_B)).keysym == 'n', "clear ignores a bad target and others");
+    nessession_binding_set_key(s, NES_TARGET_PORT(0, NES_ACT_B), 'z', NULL, 0);
+
+    /* F9, F11 and F12 belong to the frontends */
+    check(nessession_key_reserved(NES_KEYSYM_F9) && nessession_key_reserved(NES_KEYSYM_F11) &&
+          nessession_key_reserved(NES_KEYSYM_F12) && !nessession_key_reserved(NES_KEYSYM_F10) &&
+          !nessession_key_reserved('a'), "F9, F11 and F12 are reserved, F10 is not");
+    stolen[0] = 'x';
+    nessession_binding_set_key(s, NES_TARGET_PORT(0, NES_ACT_START), NES_KEYSYM_F12, stolen, sizeof stolen);
+    check(nessession_binding_get(s, NES_TARGET_PORT(0, NES_ACT_START)).keysym == NES_KEYSYM_RETURN && !stolen[0],
+          "binding F12 is ignored, nothing is stolen");
+    check(nessession_target_for_key(s, NES_KEYSYM_F9) == -1, "and F9 drives nothing");
+
+    /* Show bindings */
+    check(nessession_controls_show_bindings(s) == 0, "Show bindings starts off");
+    nessession_set_controls_show_bindings(s, 1);
+    check(nessession_controls_show_bindings(s) == 1 &&
+          nessession_get_int(s, "controllers_show_bindings", 0) == 1, "and is kept as controllers_show_bindings");
+
+    /* the table keeps its 23 slots */
+    check(NES_TARGET_COUNT == 23, "23 targets");
+
     /* persistence */
     nessession_free(s);
     s = nessession_new(&p);
     check(s && nessession_target_for_key(s, 'x') == NES_TARGET_PORT(1, NES_ACT_A), "the rebinding persisted");
+    check(nessession_controls_show_bindings(s) == 1, "Show bindings persisted");
     nessession_bindings_reset(s);
     check(nessession_target_for_key(s, 'x') == NES_TARGET_PORT(0, NES_ACT_A), "reset restores the defaults");
     nessession_free(s);
+
+    /* a stored F12 (an old settings file) is dropped on load */
+    {
+        char line[256];
+        FILE *fil;
+        snprintf(line, sizeof line, "%s/settings.ini", cfg);
+        fil = fopen(line, "w");
+        if (fil) {
+            fprintf(fil, "bindings=%d.k:%u\n", NES_TARGET_PORT(0, NES_ACT_START), (unsigned)NES_KEYSYM_F12);
+            fclose(fil);
+        }
+        s = nessession_new(&p);
+        check(s && nessession_target_for_key(s, NES_KEYSYM_F12) == -1 &&
+              nessession_binding_get(s, NES_TARGET_PORT(0, NES_ACT_START)).keysym == 0,
+              "a stored F12 binding is dropped on load");
+        nessession_free(s);
+    }
 
     printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

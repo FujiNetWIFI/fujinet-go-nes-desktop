@@ -225,16 +225,46 @@ typedef enum {
 #define NES_TARGET_SYSACT(sa)      (2 * NES_ACT_PER_PORT + NES_SW_COUNT + (sa))
 #define NES_TARGET_COUNT           (2 * NES_ACT_PER_PORT + NES_SW_COUNT + NES_SYSACT_COUNT)
 
-/* Apply one control directly. `down` is press/release. The RESET button
- * resets on press. */
+/* The Controllers window's pointer holds one control: a pressed part. `down`
+ * is press/release. Pad buttons and the RESET key follow `down`; the RESET key
+ * resets the machine when it goes from nobody holding it to somebody. A system
+ * action fires on the press. Thread: any (the machine's reset runs on the
+ * calling thread, with no session lock held). */
 void nessession_press(nessession *s, int target, int down);
 void nessession_sysaction(nessession *s, int sysact);
-/* Release everything the keyboard holds (focus loss). */
+
+/* ---- input sources -------------------------------------------------------
+ * Every way of holding an input is a source of its own (the keyboard, the
+ * Controllers window's pointer, each gamepad's buttons and its stick), and the
+ * console sees their merge, with opposed directions (Up with Down, Left with
+ * Right) cancelled. A source can only ever release what it held itself: a key
+ * release never drops a pad's hold, and a pad unplugged never drops a key's.
+ *
+ * nessession_press and nessession_pointer_set are the WINDOW's pointer
+ * source; nessession_key is the KEYBOARD's. */
+/* The pointer's hold on `port`'s four directions: the direction bits (bit per
+ * nes_action) from nessession_dpad_from_vector, merged with every other
+ * source. Only the direction bits are replaced: a button held with
+ * nessession_press stays held (another finger). A drag that changes direction
+ * passes the new mask without letting go; pass 0 when the drag ends. */
+void nessession_pointer_set(nessession *s, int port, unsigned mask);
+/* Release what the keyboard and the window's pointer hold (the Controllers
+ * window's focus loss, entering Map mode), and every key held on the
+ * expansion keyboard. A gamepad is a physical thing and is left alone. */
 void nessession_release_all(nessession *s);
+/* Only the window's pointer (a pressed part, the cross drag)... */
+void nessession_release_pointer(nessession *s);
+/* ...or only the host keyboard's holds (the main window's focus loss): the
+ * controller keys, and the host keys typed into the expansion keyboard. The
+ * pointer's and the pads' holds stay. */
+void nessession_release_keyboard(nessession *s);
 /* What the console sees held on a port right now (keyboard, gamepads and
- * the on-screen controller together), one bit per nes_action: bit
- * NES_ACT_UP ... bit NES_ACT_TURBO_B. For a controller window's highlights. */
+ * the on-screen controller together, opposed pairs cancelled), one bit per
+ * nes_action: bit NES_ACT_UP ... bit NES_ACT_TURBO_B. For a controller
+ * window's highlights: the window is a gamepad tester. */
 unsigned nessession_buttons_held(nessession *s, int port);
+/* 1 if `target` (a port action or the RESET key) is held from any source. */
+int  nessession_target_held(nessession *s, int target);
 
 /* ---- keyboard translation ------------------------------------------------
  * keysym is an X11/xkb keysym (== a GDK keyval; Qt, Win32 and AppKit map
@@ -317,7 +347,17 @@ void nessession_binding_set_key(nessession *s, int target, uint32_t keysym,
                                 char *stolen, int stolensz);
 void nessession_binding_set_button(nessession *s, int target, int button,
                                    char *stolen, int stolensz);
+/* Unbind both the key and the pad button of a target. */
+void nessession_binding_clear(nessession *s, int target);
 void nessession_bindings_reset(nessession *s);
+/* 1 for the keys the frontends own and no binding can take: F9 (the
+ * Controllers window), F11 (full screen), F12 (the debugger). A set_key with
+ * one is ignored; a stored one is dropped on load. */
+int  nessession_key_reserved(uint32_t keysym);
+/* The Controllers window's "Show bindings" checkbox: whether each part
+ * carries the key bound to it. Persisted as controllers_show_bindings. */
+int  nessession_controls_show_bindings(nessession *s);
+void nessession_set_controls_show_bindings(nessession *s, int on);
 const char *nes_pad_button_name(int button);
 /* The target a keysym / pad button drives, or -1. */
 int nessession_target_for_key(nessession *s, uint32_t keysym);
@@ -398,7 +438,10 @@ const char *nessession_tapes_path(const nessession *s);
 
 /* ---- gamepads (SDL, hotplugged; started by nessession_start) -------------
  * Pads are assigned to ports in connection order unless assigned
- * explicitly. A pad that disconnects and reconnects gets its port back. */
+ * explicitly. An explicit assignment is remembered in the "pad_assign"
+ * setting (SDL GUID + name -> port): the pad gets it back when it reconnects
+ * and on the next run; assigning -1 (Automatic) forgets it. Only ports 0
+ * and 1 exist (anything else is Automatic). */
 int  nessession_gamepad_count(nessession *s);
 int  nessession_gamepad_name(nessession *s, int idx, char *dst, int dstsz);
 void nessession_gamepad_assign(nessession *s, int idx, int port); /* -1 = auto */
@@ -458,6 +501,151 @@ const char *nessession_config_path(const nessession *s);
 const char *nessession_data_path(const nessession *s);
 const char *nessession_carts_path(const nessession *s);
 const char *nessession_sd_path(const nessession *s);
+
+/* ---- the on-screen controllers -------------------------------------------
+ * One layout for every toolkit: two NES-001 pads (each 16 x 7 u) and the
+ * console strip (33 x 4 u) below them, in the layout units of DESIGN-nes.md
+ * (u) from the top-left, +y down. A frontend draws each part's art in the
+ * part's rectangle. Every port-type combination has the same extent
+ * (NESSESSION_CONTROLS_W x NESSESSION_CONTROLS_H), so the window never changes
+ * size when a port is set to None. `target` is the binding target a part
+ * drives (NES_TARGET_*), or -1 for the cross (which is dragged), the arms (lit
+ * only), bodies and captions. The returned table is static and valid for the
+ * process; entries are in paint order.
+ *
+ * How to drive and light each kind:
+ *  - DPAD: press and drag over the cross; nessession_dpad_from_vector(dx, dy)
+ *    from the part's centre gives the direction mask for
+ *    nessession_pointer_set(port, mask). 0 when the drag ends (also release
+ *    on focus loss and hide).
+ *  - DPAD_ARM: drawn and lit only (never hit); lit while
+ *    nessession_target_held(arm target), shifted toward the press.
+ *  - ROUND_BUTTON / PILL / BUTTON: press and release with
+ *    nessession_press(target, down); lit while nessession_target_held(target).
+ *  - BODY entries name the art by `label` ("NES-001", "Face", "Stripe",
+ *    "DpadWell", "SelectWell", "ButtonWell", "Socket", "Console", "Base",
+ *    "POWER") and `device` (a nes_ctrl_type; -1 for the console's); a CAPTION
+ *    is text (its `label`), red on the pad's face except "Player n" and
+ *    "No controller". */
+/* The colours of the pad and the console strip (DESIGN-nes.md; read from the
+ * photos, +/- 8%), shared so the four toolkits paint alike. */
+#define NESSESSION_SHELL_RGB        0xD8D6D0 /* the pad's shell, the wells, the turbo pills */
+#define NESSESSION_SHELL_SHADOW_RGB 0xB5B3AD /* its bevel */
+#define NESSESSION_FACE_RGB         0x3A3A3C /* the dark face plate */
+#define NESSESSION_STRIPE_RGB       0xBDBBB4
+#define NESSESSION_DPAD_RGB         0x161616 /* the cross */
+#define NESSESSION_DPAD_DIMPLE_RGB  0x2A2A2A
+#define NESSESSION_DPAD_MARK_RGB    0x303030 /* the embossed triangles */
+#define NESSESSION_RUBBER_RGB       0x2E2E30 /* SELECT / START pills */
+#define NESSESSION_LEGEND_RGB       0xC8392B /* the red legends and "Nintendo" */
+#define NESSESSION_BUTTON_RGB       0xE0281C /* B and A */
+#define NESSESSION_BUTTON_LIGHT_RGB 0xF2503F
+#define NESSESSION_HELD_RGB         0xFFB04A /* the ring on a held red part */
+#define NESSESSION_HELD_FILL_RGB    0xB01810 /* a held round button's darker fill */
+#define NESSESSION_DPAD_HELD_RGB    0xFF9A2E /* a held arm's tint (55%) */
+#define NESSESSION_CONSOLE_RGB      0xD2D0CA /* the console slab */
+#define NESSESSION_CONSOLE_BASE_RGB 0x8F8F92
+#define NESSESSION_KEY_RGB          0x9A9A9E /* POWER / RESET */
+#define NESSESSION_KEY_INK_RGB      0x4A4A4C
+#define NESSESSION_SOCKET_RGB       0x8E8C86 /* an empty port's dashed outline */
+#define NESSESSION_SOCKET_INK_RGB   0x6E6C66
+#define NESSESSION_CONTROLS_W 33.0f
+#define NESSESSION_CONTROLS_H 12.8f
+
+typedef enum {
+    NES_CTL_CAPTION = 0,   /* text */
+    NES_CTL_BODY,          /* drawn only (see label) */
+    NES_CTL_DPAD,          /* the cross's grab area (4.6 u square): drag; not drawn itself */
+    NES_CTL_DPAD_ARM,      /* one arm of the cross: drawn and lit; target Up/Down/Left/Right */
+    NES_CTL_ROUND_BUTTON,  /* B, A: hit as an ellipse */
+    NES_CTL_PILL,          /* SELECT, START, TURBO B / A: hit as a rectangle grown by 0.25 u */
+    NES_CTL_BUTTON         /* the console's RESET key: hit as a rectangle */
+} nes_control_kind;
+
+typedef struct {
+    int kind;            /* nes_control_kind */
+    const char *label;   /* "A", "SELECT", "T", "RESET", "Face", "Player 1", ... */
+    const char *legend;  /* a hint ("turbo B", "not interactive"), or NULL */
+    int port;            /* 0 or 1, -1 for the console */
+    int target;          /* binding target, or -1 */
+    int device;          /* nes_ctrl_type of the port's view, -1 for the console */
+    float x, y, w, h;
+} nes_control;
+
+/* The layout for the two ports' types (nes_ctrl_type; anything unknown is
+ * drawn as a standard pad); *n is its entry count and width / height (u) its
+ * extent. Pass nessession_port_type(s, 0) and (s, 1). */
+const nes_control *nessession_controls_layout(int type0, int type1, int *n,
+                                              float *width, float *height);
+/* The topmost pressable part under a point in layout units, as an index into
+ * the layout, or -1 (bodies, captions and arms are never hit). */
+int nessession_controls_hit(int type0, int type1, float x, float y);
+/* The cross drag: the direction bits (1 << NES_ACT_UP etc., one or two) for a
+ * pointer at (dx, dy) u from the cross's centre (+x right, +y down): nothing
+ * within 0.4 u, else one of eight 45-degree sectors. Opposed bits never
+ * come out together. Feed it to nessession_pointer_set. */
+unsigned nessession_dpad_from_vector(float dx, float dy);
+
+/* The on-screen expansion keyboards, drawn: the case, its plates and each key
+ * with its colours, in key units (1 u = one key pitch) from the top-left.
+ * nessession_keyboard_layout (above) is the bare key list; this is the same
+ * keys placed in their case. Click a key with nessession_keyboard_press(index,
+ * down) and light it with nessession_keyboard_held(index); draw each key cell
+ * inset by about 0.06. */
+typedef enum {
+    NES_SKIN_BODY = 0,   /* drawn only: label names the art (see below) */
+    NES_SKIN_KEYCAP      /* a key; `key` valid */
+} nes_skin_kind;
+
+/* A key's cap class (also tells the colours): Family BASIC has red and grey
+ * caps; the Subor has dark and cream ones. */
+typedef enum {
+    NES_CAP_GREY = 0, NES_CAP_RED, NES_CAP_DARK, NES_CAP_CREAM,
+    NES_CAP_PALE         /* Family BASIC CLR HOME / INS / DEL: pale grey, blue legend */
+} nes_cap_class;
+
+typedef struct {
+    int kind;            /* nes_skin_kind */
+    const char *label;   /* KEYCAP: the legend; BODY: "Case", "Vent" (a group of
+                          * vertical slits), "Well" (a recess the keys sit in;
+                          * fill + ink = its outline), "Name", "Plate", "Slot",
+                          * "Brand", "Logo" */
+    const char *text;    /* BODY: the plate's words, or NULL. KEYCAP (Family
+                          * BASIC): "shifted|kana" printed small on the cap, the
+                          * shifted symbol top right and the katakana bottom
+                          * right (UTF-8, either half may be empty), else NULL */
+    int key;             /* KEYCAP: index for keyboard_press / keyboard_held; BODY: -1 */
+    int cap_class;       /* nes_cap_class (KEYCAP) */
+    uint32_t fill_rgb;   /* the cap's or plate's fill, 0xRRGGBB */
+    uint32_t ink_rgb;    /* its legend / text colour */
+    float x, y, w, h;
+} nes_skin_item;
+
+#define NESSESSION_FB_CASE_RGB    0xEBE9E2   /* Family BASIC case (famibasic-user.png) */
+#define NESSESSION_FB_VENT_RGB    0xB9B8B3   /* vent slits */
+#define NESSESSION_FB_WELL_RGB    0xD9D6CE   /* key recess */
+#define NESSESSION_FB_WELL_EDGE_RGB 0x6E6C68 /* its outline */
+#define NESSESSION_FB_NAME_INK_RGB 0xF4F2EE  /* white HVC-007 on its plate */
+#define NESSESSION_FB_PALE_RGB    0xD4D6D6   /* CLR HOME / INS / DEL caps */
+#define NESSESSION_FB_PALE_INK_RGB 0x4A5A7A  /* their blue-grey legends */
+#define NESSESSION_FB_PLATE_RGB   0x8A1F30   /* its HVC-007 / FAMILY COMPUTER plates */
+#define NESSESSION_FB_GOLD_RGB    0xD8C078   /* text on them */
+#define NESSESSION_FB_RED_RGB     0xA52430   /* red caps */
+#define NESSESSION_FB_RED_INK_RGB 0xE8D8D0
+#define NESSESSION_FB_GREY_RGB    0xB8B6B0   /* grey caps */
+#define NESSESSION_FB_GREY_INK_RGB 0x2A2A2A
+#define NESSESSION_SUBOR_CASE_RGB  0xD8D2C0  /* Subor case */
+#define NESSESSION_SUBOR_DARK_RGB  0x8B8A84  /* dark caps */
+#define NESSESSION_SUBOR_CREAM_RGB 0xE2DCC8  /* cream caps */
+#define NESSESSION_SUBOR_INK_RGB   0x1E1E1E
+
+/* The skin for NES_KBD_FAMILY_BASIC or NES_KBD_SUBOR (NULL, *n = 0 for
+ * anything else); *width / *height its extent in key units. Entries are in
+ * paint order. */
+const nes_skin_item *nessession_keyboard_skin_layout(int type, int *n,
+                                                     float *width, float *height);
+/* The topmost key under a point in key units, as an index into the skin, or -1. */
+int nessession_keyboard_skin_hit(int type, float x, float y);
 
 /* ---- debugger ------------------------------------------------------------*/
 nesdebug *nessession_debugger(nessession *s);

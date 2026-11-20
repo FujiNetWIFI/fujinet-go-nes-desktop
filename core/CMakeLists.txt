@@ -120,10 +120,13 @@ set(NES_SESSION_C_SOURCES
   src/bindings.c
   src/keyboard.c
   src/hid_keys.c
+  src/controls.c
+  src/pad_assign.c
   src/help.c
   "${NES_HELP_C}")
 set(NES_SESSION_CXX_SOURCES
   src/session.cpp
+  src/input.cpp
   src/debug.cpp
   src/expr.cpp
   src/prompt.cpp

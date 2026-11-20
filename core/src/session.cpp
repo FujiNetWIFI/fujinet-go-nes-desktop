@@ -131,6 +131,7 @@ extern "C" nessession* nessession_new(const nessession_paths* paths)
   pthread_mutex_init(&s->settings_mtx, nullptr);
   pthread_mutex_init(&s->sysact_mtx, nullptr);
   pthread_mutex_init(&s->pad_event_mtx, nullptr);
+  pthread_mutex_init(&s->input_mtx, nullptr);
 
   if(paths_init(s, paths ? paths->config_dir : nullptr,
                 paths ? paths->data_dir : nullptr) != 0)
@@ -163,6 +164,7 @@ extern "C" void nessession_free(nessession* s)
   delete host_of(s);
   pthread_mutex_destroy(&s->sysact_mtx);
   pthread_mutex_destroy(&s->pad_event_mtx);
+  pthread_mutex_destroy(&s->input_mtx);
   free(s);
 }
 
@@ -274,6 +276,7 @@ extern "C" int nessession_start(nessession* s, const nessession_start_opts* opts
   s->kbd_mode = s->opts.keyboard != NES_KBD_NONE;
   memset(s->kbd_count, 0, sizeof s->kbd_count);
   memset(s->kbd_held, 0, sizeof s->kbd_held);
+  input_reset(s);
 
   // An external FujiNet is somebody else's: no runtime of ours, the
   // cartridge just dials its address (and keeps redialling until it is up).
@@ -384,6 +387,7 @@ extern "C" void nessession_stop(nessession* s)
   fujinet_stop(s);
   s->fujinet_external = 0;
   s->running = 0;
+  input_reset(s);
 }
 
 extern "C" int nessession_is_running(const nessession* s) { return s->running; }
@@ -527,26 +531,6 @@ extern "C" void nessession_set_volume(nessession* s, int percent)
 
 // ---- input -----------------------------------------------------------------
 
-extern "C" void nessession_press(nessession* s, int target, int down)
-{
-  if(!s->running || target < 0 || target >= NES_TARGET_COUNT) return;
-
-  if(target < 2 * NES_ACT_PER_PORT)
-  {
-    host_of(s)->SetButton(target / NES_ACT_PER_PORT, target % NES_ACT_PER_PORT, down != 0);
-    return;
-  }
-  target -= 2 * NES_ACT_PER_PORT;
-  if(target < NES_SW_COUNT)
-  {
-    if(target == NES_SW_RESET && down)
-      nessession_reset_game(s);
-    return;
-  }
-  if(down)
-    nessession_sysaction(s, target - NES_SW_COUNT);
-}
-
 extern "C" void nessession_sysaction(nessession* s, int sysact)
 {
   switch(sysact)
@@ -586,20 +570,6 @@ extern "C" int nessession_sysaction_take(nessession* s, int* out)
     }
   pthread_mutex_unlock(&s->sysact_mtx);
   return found;
-}
-
-extern "C" unsigned nessession_buttons_held(nessession* s, int port)
-{
-  if(!s->running || port < 0 || port > 1) return 0;
-  return host_of(s)->GetActions(port);
-}
-
-// The gamepad thread's entry point: the same routing as press, but never
-// touching the settings or the debugger from that thread.
-extern "C" void session_gamepad_apply(struct nessession* s, int port, int act, int down)
-{
-  if(!s->running || port < 0 || port > 1 || act < 0 || act >= NES_ACT_PER_PORT) return;
-  host_of(s)->SetButton(port, act, down != 0);
 }
 
 // ---- controller types / region (live) --------------------------------------
@@ -736,6 +706,16 @@ extern "C" void session_keyboard_release_all(struct nessession* s)
       if(s->running) host_of(s)->SetKeyboardKey(i, false);
     }
   memset(s->kbd_held, 0, sizeof s->kbd_held);
+}
+
+extern "C" void session_keyboard_release_host(struct nessession* s)
+{
+  for(int i = 0; i < 16; i++)
+    if(s->kbd_held[i].keysym)
+    {
+      keyboard_count(s, s->kbd_held[i].index, -1);
+      s->kbd_held[i].keysym = 0;
+    }
 }
 
 extern "C" void nessession_keyboard_press(nessession* s, int index, int down)

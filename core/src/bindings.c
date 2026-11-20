@@ -112,6 +112,13 @@ static void compute_defaults_locked(void)
     }
 }
 
+/* F9 (the Controllers window), F11 (full screen) and F12 (the debugger) are
+ * the frontends': never bindable, so no setting can take them from a window. */
+int nessession_key_reserved(uint32_t keysym)
+{
+    return keysym == NES_KEYSYM_F9 || keysym == NES_KEYSYM_F11 || keysym == NES_KEYSYM_F12;
+}
+
 static uint32_t fold(uint32_t keysym)
 {
     if (keysym >= 'A' && keysym <= 'Z') return keysym + 32;
@@ -135,7 +142,8 @@ static void apply_persisted_locked(const char *packed)
         const char *end = strchr(p, ' ');
         if (sscanf(p, "%d.%c:%ld", &target, &kind, &value) == 3
             && target >= 0 && target < NES_TARGET_COUNT) {
-            if (kind == 'k') s_table[target].keysym = (uint32_t)value;
+            if (kind == 'k') s_table[target].keysym =
+                nessession_key_reserved((uint32_t)value) ? 0 : (uint32_t)value;
             else if (kind == 'b') s_table[target].button = (int)value;
         }
         if (!end) break;
@@ -265,8 +273,10 @@ void nessession_binding_set_key(nessession *s, int target, uint32_t keysym,
 {
     int victims[NES_TARGET_COUNT], nvictims = 0, t;
     (void)s;
+    if (stolen && stolensz > 0) stolen[0] = '\0';
     if (target < 0 || target >= NES_TARGET_COUNT) return;
     keysym = fold(keysym);
+    if (nessession_key_reserved(keysym)) return;
     pthread_mutex_lock(&s_lock);
     ensure_seeded_locked();
     if (keysym) {
@@ -307,6 +317,28 @@ void nessession_binding_set_button(nessession *s, int target, int button,
     persist_locked();
     pthread_mutex_unlock(&s_lock);
     describe_stolen(victims, nvictims, stolen, stolensz);
+}
+
+void nessession_binding_clear(nessession *s, int target)
+{
+    (void)s;
+    if (target < 0 || target >= NES_TARGET_COUNT) return;
+    pthread_mutex_lock(&s_lock);
+    ensure_seeded_locked();
+    s_table[target].keysym = 0;
+    s_table[target].button = NES_PAD_BTN_NONE;
+    persist_locked();
+    pthread_mutex_unlock(&s_lock);
+}
+
+int nessession_controls_show_bindings(nessession *s)
+{
+    return nessession_get_int(s, "controllers_show_bindings", 0) != 0;
+}
+
+void nessession_set_controls_show_bindings(nessession *s, int on)
+{
+    nessession_set_int(s, "controllers_show_bindings", on ? 1 : 0);
 }
 
 void nessession_bindings_reset(nessession *s)
@@ -455,53 +487,39 @@ int nessession_key_sysaction(nessession *s, uint32_t keysym)
 int nessession_key(nessession *s, uint32_t keysym, int down)
 {
     uint32_t folded = fold(keysym);
-    int t;
+    int t, hit = 0;
 
     if (!s) return 0;
     /* keyboard mode (and Scroll Lock, its toggle) first */
     if (session_keyboard_key(s, keysym, down)) return 1;
     if (down) {
-        int hit = 0;
         /* every target the key drives; a system action is the frontend's
-         * to fire and is not a machine input */
-        pthread_mutex_lock(&s_lock);
-        ensure_seeded_locked();
+         * to fire and is not a machine input. The binding lock is let go
+         * around each press: RESET resets the machine. */
         for (t = 0; t < NES_TARGET_SYSACT(0); t++) {
-            if (s_table[t].keysym != folded) continue;
+            int mine;
+            pthread_mutex_lock(&s_lock);
+            ensure_seeded_locked();
+            mine = s_table[t].keysym == folded;
+            pthread_mutex_unlock(&s_lock);
+            if (!mine) continue;
             hit = 1;
             if (s->held_keysym[t] == folded) continue;  /* auto-repeat */
             s->held_keysym[t] = folded;
-            pthread_mutex_unlock(&s_lock);
-            nessession_press(s, t, 1);
-            pthread_mutex_lock(&s_lock);
-        }
-        pthread_mutex_unlock(&s_lock);
-        return hit;
-    }
-    {
-        int hit = 0;
-        /* remembered by the key, so a release clears exactly what its press
-         * asserted even if the binding changed in between */
-        for (t = 0; t < NES_TARGET_COUNT; t++) {
-            if (s->held_keysym[t] == folded) {
-                s->held_keysym[t] = 0;
-                nessession_press(s, t, 0);
-                hit = 1;
-            }
+            input_press(s, NESSESSION_SRC_KEYBOARD, t, 1);
         }
         return hit;
     }
-}
-
-void nessession_release_all(nessession *s)
-{
-    int t;
-    if (!s) return;
-    session_keyboard_release_all(s);
-    for (t = 0; t < NES_TARGET_COUNT; t++) {
-        if (s->held_keysym[t]) {
+    /* remembered by the key, so a release clears exactly what its press
+     * asserted even if the binding changed in between -- and only the
+     * keyboard's own hold: a pad or the window holding the same input keeps
+     * it */
+    for (t = 0; t < NES_TARGET_SYSACT(0); t++) {
+        if (s->held_keysym[t] == folded) {
             s->held_keysym[t] = 0;
-            nessession_press(s, t, 0);
+            input_press(s, NESSESSION_SRC_KEYBOARD, t, 0);
+            hit = 1;
         }
     }
+    return hit;
 }
