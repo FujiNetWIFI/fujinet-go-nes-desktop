@@ -277,10 +277,11 @@
 }
 
 /* Losing key status with keys held would leave the machine believing they
- * are still down. */
+ * are still down. Only the keyboard's holds go: the Controllers panel's
+ * pointer and the gamepads are not this window's to drop. */
 - (void)windowDidResignKey:(NSNotification *)note
 {
-    if (_session && note.object == _window) nessession_release_all(_session);
+    if (_session && note.object == _window) nessession_release_keyboard(_session);
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app
@@ -550,6 +551,16 @@
 }
 
 - (void)toggleControllers:(id)sender { (void)sender; [NESControllersWindow toggleWithSession:_session]; }
+- (void)openControllersFromPrefs:(id)sender { (void)sender; [NESControllersWindow showWithSession:_session]; }
+
+/* Settings > Reset Controls: every key and pad binding back to its default. */
+- (void)resetControlsFromPrefs:(id)sender
+{
+    (void)sender;
+    nessession_bindings_reset(_session);
+    [NESControllersWindow refresh];
+    [self showToast:@"Controls reset to defaults"];
+}
 - (void)toggleDebugger:(id)sender { (void)sender; [NESDebuggerWindow toggleForSession:_session]; }
 
 - (void)setAspect:(int)aspect
@@ -764,6 +775,13 @@
     NSStackView *padRow = [NSStackView stackViewWithViews:@[_padList, _padPort]];
     padRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
 
+    NSButton *openControllers = [NSButton buttonWithTitle:@"Open Controllers"
+                                                   target:self action:@selector(openControllersFromPrefs:)];
+    NSButton *resetControls = [NSButton buttonWithTitle:@"Reset Controls"
+                                                 target:self action:@selector(resetControlsFromPrefs:)];
+    NSStackView *controlsRow = [NSStackView stackViewWithViews:@[openControllers, resetControls]];
+    controlsRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+
     _externalField = [NSTextField textFieldWithString:@(
         nessession_get_str(_session, "fujinet_external_addr", ""))];
     _externalField.placeholderString = @"127.0.0.1:11506";
@@ -786,6 +804,7 @@
         @[ [NSTextField labelWithString:@""],
            [self checkBoxForKey:"analog_joystick" title:@"Analog sticks drive the D-pad" fallback:1] ],
         @[ [NSTextField labelWithString:@"Gamepads"], padRow ],
+        @[ [NSTextField labelWithString:@""], controlsRow ],
         @[ [NSTextField labelWithString:@"Expansion port"],
            [self popUpForKey:"keyboard" fallback:NES_KBD_NONE names:nes_keyboard_name] ],
         @[ [NSTextField labelWithString:@"Volume"], volume ],
@@ -809,7 +828,7 @@
     root.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
 
     _settingsWindow = [[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 560, 520)
+        initWithContentRect:NSMakeRect(0, 0, 560, 560)
                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
                     backing:NSBackingStoreBuffered
                       defer:NO];
