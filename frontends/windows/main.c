@@ -453,6 +453,20 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDC_SET_AUDIO: settings_apply_checkbox(hwnd, IDC_SET_AUDIO, "enable_audio", 1); return 0;
         case IDC_SET_GAMEPAD: settings_apply_checkbox(hwnd, IDC_SET_GAMEPAD, "enable_gamepad", 1); return 0;
+        case IDC_SET_RESET_CTRL: {
+            /* every key, pad button and pad assignment back to its default */
+            const int pads = nessession_gamepad_count(g_session);
+            int pad;
+            nessession_bindings_reset(g_session);
+            for (pad = 0; pad < pads; pad++) nessession_gamepad_assign(g_session, pad, -1);
+            snprintf(g_pad_notice, sizeof g_pad_notice, "Controls reset to their defaults");
+            g_pad_notice_until = GetTickCount() + PAD_NOTICE_MS;
+            update_status();
+            refresh_pad_list();
+            nes_controller_window_gamepads_changed();
+            return 0;
+        }
+        case IDC_SET_OPEN_CTRL: nes_controller_window_show(g_hwnd, g_session); return 0;
         default: break;
         }
         break;
@@ -630,8 +644,16 @@ static void show_settings(HINSTANCE inst)
     y += 30;
     settings_checkbox(g_settings_window, inst, "Audio", IDC_SET_AUDIO, 16, y, 200,
                       nessession_get_int(g_session, "enable_audio", 1)); y += 26;
-    settings_checkbox(g_settings_window, inst, "Gamepads", IDC_SET_GAMEPAD, 16, y, 200,
+    settings_checkbox(g_settings_window, inst, "Gamepads", IDC_SET_GAMEPAD, 16, y, 150,
                       nessession_get_int(g_session, "enable_gamepad", 1));
+    {
+        HWND reset = CreateWindowExA(0, "BUTTON", "Reset Controls", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     180, y - 3, 120, 26, g_settings_window, (HMENU)(INT_PTR)IDC_SET_RESET_CTRL, inst, NULL);
+        HWND open = CreateWindowExA(0, "BUTTON", "Open Controllers", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                    306, y - 3, 125, 26, g_settings_window, (HMENU)(INT_PTR)IDC_SET_OPEN_CTRL, inst, NULL);
+        SendMessageA(reset, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(open, WM_SETFONT, (WPARAM)font, TRUE);
+    }
 
     {
         HWND hb = CreateWindowExA(0, "BUTTON", "Help", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 16, y - 34, 80, 26,
@@ -895,7 +917,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE) {
-            nessession_release_all(g_session);
+            /* The keyboard's holds only: a button held in the Controllers
+             * window with the mouse is that window's to let go. */
+            nessession_release_keyboard(g_session);
             memset(g_sysact_down, 0, sizeof g_sysact_down);
         }
         return 0;
