@@ -69,7 +69,14 @@
     <!-- The CURRENT release templates its version from @PROJECT_VERSION@, so
          it cannot disagree with the tree; past releases are literal. The
          release job checks that this first entry is still a template. -->
-    <release version="@PROJECT_VERSION@" date="2026-11-16">
+    <release version="@PROJECT_VERSION@" date="2026-11-19">
+      <description>
+        <p>
+          A new Controllers window: both NES controllers drawn as they look, with the D-pad, B, A, Select, Start and the small turbo buttons, and the console's RESET key. Press and drag them with the mouse; Map, Clear, Defaults and Show bindings change any control. Gamepads are remembered per player across runs, letting go of a key no longer drops a button a pad or the mouse still holds, and a pad set to Player 1 no longer leaves the next pad idle. The expansion keyboard page draws the Family BASIC keyboard (HVC-007) and the Subor keyboard, and its keys can be clicked.
+        </p>
+      </description>
+    </release>
+    <release version="0.7.0" date="2026-11-16">
       <description>
         <p>
           macOS: the picture is drawn with Metal in step with the display, so it is smoother on 60 and 120 Hz screens; the emulator runs with game-grade scheduling priority; and the app opts into macOS Game Mode when it is full screen.
